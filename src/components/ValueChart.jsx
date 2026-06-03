@@ -1,0 +1,58 @@
+import React from 'react'
+import { fmtDateShort } from '../lib/format'
+
+const W = 1020
+const P = { l: 46, r: 14, t: 14, b: 26 }
+const xAt = (i, n) => P.l + (n <= 1 ? 0 : (i * (W - P.l - P.r)) / (n - 1))
+
+function path(vals, yOf, n) {
+  let d = ''
+  vals.forEach((v, i) => {
+    d += (i ? 'L' : 'M') + xAt(i, n).toFixed(1) + ' ' + yOf(v).toFixed(1) + ' '
+  })
+  return d
+}
+
+export default function ValueChart({ pts }) {
+  const H = 300
+  const n = pts.length
+  const lp = pts.map((p) => p.lp)
+  const hd = pts.map((p) => p.hodl)
+  const lo = Math.min(...lp, ...hd)
+  const hi = Math.max(...lp, ...hd)
+  const pad = Math.max(1.5, (hi - lo) * 0.08)
+  const yMin = lo - pad
+  const yMax = hi + pad
+  const yOf = (v) => P.t + (1 - (v - yMin) / (yMax - yMin)) * (H - P.t - P.b)
+
+  const grid = []
+  for (let k = 0; k <= 5; k++) {
+    const v = yMin + ((yMax - yMin) * k) / 5
+    const y = yOf(v)
+    grid.push(<line key={'g' + k} className="gl" x1={P.l} y1={y} x2={W - P.r} y2={y} />)
+    grid.push(
+      <text key={'yl' + k} className="ax" x={P.l - 8} y={y + 3} textAnchor="end">{v.toFixed(0)}</text>
+    )
+  }
+  const nx = Math.min(7, n)
+  const xt = []
+  for (let k = 0; k < nx; k++) {
+    const i = Math.round((k * (n - 1)) / (nx - 1 || 1))
+    xt.push(
+      <text key={'x' + k} className="ax" x={xAt(i, n)} y={H - 8} textAnchor="middle">{fmtDateShort(pts[i].day)}</text>
+    )
+  }
+  const hodlPath = path(hd, yOf, n)
+  const lpPath = path(lp, yOf, n)
+  const area = hodlPath + 'L' + xAt(n - 1, n) + ' ' + yOf(yMin) + ' L' + xAt(0, n) + ' ' + yOf(yMin) + ' Z'
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`}>
+      {grid}
+      {xt}
+      <path d={area} fill="#7f6ae8" opacity="0.08" />
+      <path d={hodlPath} fill="none" stroke="#63f2be" strokeWidth="2.1" strokeLinejoin="round" />
+      <path d={lpPath} fill="none" stroke="#7f6ae8" strokeWidth="2.1" strokeLinejoin="round" />
+    </svg>
+  )
+}
