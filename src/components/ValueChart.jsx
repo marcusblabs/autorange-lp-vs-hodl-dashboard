@@ -1,9 +1,7 @@
 import React from 'react'
-import { fmtDateShort } from '../lib/format'
-
-const W = 1020
-const P = { l: 46, r: 14, t: 14, b: 26 }
-const xAt = (i, n) => P.l + (n <= 1 ? 0 : (i * (W - P.l - P.r)) / (n - 1))
+import { fmtDate, fmtDateShort, fmtPct } from '../lib/format'
+import { W, P, xAt, xPct } from '../lib/chartGeom'
+import { useHoverIndex } from './useHoverIndex'
 
 function path(vals, yOf, n) {
   let d = ''
@@ -16,6 +14,7 @@ function path(vals, yOf, n) {
 export default function ValueChart({ pts }) {
   const H = 300
   const n = pts.length
+  const { ref, idx, onMove, onLeave } = useHoverIndex(n)
   const lp = pts.map((p) => p.lp)
   const hd = pts.map((p) => p.hodl)
   const lo = Math.min(...lp, ...hd)
@@ -47,13 +46,32 @@ export default function ValueChart({ pts }) {
   const lpPath = path(lp, yOf, n)
   const area = hodlPath + 'L' + xAt(n - 1, n) + ' ' + yOf(yMin) + ' L' + xAt(0, n) + ' ' + yOf(yMin) + ' Z'
 
+  const hov = idx != null ? pts[idx] : null
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`}>
-      {grid}
-      {xt}
-      <path d={area} fill="#7f6ae8" opacity="0.08" />
-      <path d={hodlPath} fill="none" stroke="#63f2be" strokeWidth="2.1" strokeLinejoin="round" />
-      <path d={lpPath} fill="none" stroke="#7f6ae8" strokeWidth="2.1" strokeLinejoin="round" />
-    </svg>
+    <div className="chartwrap">
+      <svg ref={ref} viewBox={`0 0 ${W} ${H}`} onMouseMove={onMove} onMouseLeave={onLeave}>
+        {grid}
+        {xt}
+        <path d={area} fill="#7f6ae8" opacity="0.08" />
+        <path d={hodlPath} fill="none" stroke="#63f2be" strokeWidth="2.1" strokeLinejoin="round" />
+        <path d={lpPath} fill="none" stroke="#7f6ae8" strokeWidth="2.1" strokeLinejoin="round" />
+        {hov && (
+          <g className="cross" pointerEvents="none">
+            <line x1={xAt(idx, n)} y1={P.t} x2={xAt(idx, n)} y2={H - P.b} />
+            <circle cx={xAt(idx, n)} cy={yOf(hov.hodl)} r="3.6" fill="#63f2be" stroke="var(--panel)" strokeWidth="1.4" />
+            <circle cx={xAt(idx, n)} cy={yOf(hov.lp)} r="3.6" fill="#7f6ae8" stroke="var(--panel)" strokeWidth="1.4" />
+          </g>
+        )}
+      </svg>
+      {hov && (
+        <div className={'tip' + (xPct(idx, n) > 62 ? ' flip' : '')} style={{ left: xPct(idx, n) + '%' }}>
+          <div className="tip-d">{fmtDate(hov.day)}</div>
+          <div className="tip-r"><span className="dot" style={{ background: 'var(--purple)' }} />LP<b>{hov.lp.toFixed(2)}</b></div>
+          <div className="tip-r"><span className="dot" style={{ background: 'var(--green)' }} />HODL<b>{hov.hodl.toFixed(2)}</b></div>
+          <div className="tip-g">LP − HODL {fmtPct(hov.gap)}</div>
+        </div>
+      )}
+    </div>
   )
 }
