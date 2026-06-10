@@ -1,74 +1,84 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  POOLS, WINDOWS, DUNE_QUERY_ID, DUNE_QUERY_URL,
-  BALANCER_POOL_URL, EXPLORER_ADDR,
+  WINDOWS, EXTRA_POOLS, FALLBACK_POOLS,
+  DUNE_QUERY_ID, DUNE_QUERY_URL, BALANCER_POOL_URL, EXPLORER_ADDR,
 } from './config'
-import { getDuneApiKey, subscribeDuneApiKey } from './lib/duneApiKey'
-import { getLatestResults, executeAndPoll } from './lib/dune'
-import { SAMPLE_SERIES } from './lib/sampleData'
+import { fetchReclammPools, fetchPoolSeries } from './lib/balancer'
 import { normalizeSeries, computeWindow, maxWindowDays, isLive } from './lib/series'
-import ApiKeyPanel from './components/ApiKeyPanel'
 import StatCards from './components/StatCards'
 import ValueChart from './components/ValueChart'
 import GapChart from './components/GapChart'
-import { shortAddr } from './lib/format'
+import { shortAddr, fmtUsd } from './lib/format'
 
 const WIN_LABEL = { 1: '1D', 7: '7D', 14: '14D', 30: '30D', 60: '60D', 90: '90D', 180: '180D' }
 
+function mergeExtras(list) {
+  const seen = new Set(list.map((p) => p.address))
+  const merged = [...list, ...EXTRA_POOLS.filter((p) => !seen.has(p.address))]
+  // Same token pair can exist as several pools — make the labels unique.
+  const counts = merged.reduce((m, p) => m.set(p.label, (m.get(p.label) || 0) + 1), new Map())
+  return merged.map((p) =>
+    counts.get(p.label) > 1 ? { ...p, label: `${p.label} (${shortAddr(p.address)})` } : p
+  )
+}
+
 export default function App() {
-  const [poolAddr, setPoolAddr] = useState(POOLS[0].address)
+  const [pools, setPools] = useState(null) // null until the live list arrives
+  const [poolAddr, setPoolAddr] = useState('')
   const [custom, setCustom] = useState('')
   const [windowDays, setWindowDays] = useState(30)
   const [series, setSeries] = useState(null)
   const [status, setStatus] = useState('idle') // idle | loading | ready | error
   const [error, setError] = useState(null)
-  const [usingSample, setUsingSample] = useState(false)
-  const [executedAt, setExecutedAt] = useState(null)
-  const [keyV, setKeyV] = useState(0)
+  const loadSeq = useRef(0)
 
-  useEffect(() => subscribeDuneApiKey(() => setKeyV((v) => v + 1)), [])
+  // Live reCLAMM pool list, highest-TVL live pool preselected.
+  useEffect(() => {
+    let on = true
+    fetchReclammPools()
+      .then((list) => {
+        if (!on) return
+        const merged = mergeExtras(list)
+        setPools(merged)
+        setPoolAddr((prev) => prev || merged[0]?.address || '')
+      })
+      .catch(() => {
+        if (!on) return
+        setPools(FALLBACK_POOLS)
+        setPoolAddr((prev) => prev || FALLBACK_POOLS[0].address)
+      })
+    return () => { on = false }
+  }, [])
 
   const activeAddr = (custom.trim() || poolAddr).toLowerCase()
 
   async function load({ force = false } = {}) {
     const addr = activeAddr
+    if (!addr) return
     if (!/^0x[0-9a-f]{40}$/.test(addr)) {
-      setStatus('error'); setError(new Error('Enter a valid 0x pool address.')); return
+      setStatus('error'); setError(new Error('Enter a valid 0x pool address.')); setSeries(null)
+      return
     }
-    const sample = SAMPLE_SERIES[addr]
-    const key = getDuneApiKey()
-
-    if (!key && !force) {
-      if (sample) {
-        setSeries(normalizeSeries(sample)); setUsingSample(true); setExecutedAt(null); setStatus('ready'); setError(null)
-        return
-      }
-      setStatus('error'); setError({ code: 'NO_KEY' }); return
-    }
-
+    const seq = ++loadSeq.current
     setStatus('loading'); setError(null)
     try {
-      let res
-      if (force) {
-        res = await executeAndPoll(DUNE_QUERY_ID, { pool: addr })
-      } else {
-        res = await getLatestResults(DUNE_QUERY_ID, { pool: addr })
-        if (res.isEmpty) res = await executeAndPoll(DUNE_QUERY_ID, { pool: addr })
+      const rows = await fetchPoolSeries(addr, { force })
+      if (seq !== loadSeq.current) return // a newer selection superseded this load
+      const norm = normalizeSeries(rows)
+      if (norm.length < 2) {
+        setSeries(null); setStatus('error')
+        setError(new Error('Not enough daily history for this pool yet (needs at least 2 days).'))
+        return
       }
-      const norm = normalizeSeries(res.rows)
-      if (!norm.length) {
-        if (sample) { setSeries(normalizeSeries(sample)); setUsingSample(true); setStatus('ready'); return }
-        setStatus('error'); setError(new Error('No reCLAMM data for this pool on Ethereum.')); return
-      }
-      setSeries(norm); setUsingSample(false); setExecutedAt(res.executedAt); setStatus('ready')
+      setSeries(norm); setStatus('ready')
     } catch (e) {
-      if (sample) { setSeries(normalizeSeries(sample)); setUsingSample(true); setExecutedAt(null); setStatus('ready'); setError(e); return }
-      setStatus('error'); setError(e)
+      if (seq !== loadSeq.current) return
+      setSeries(null); setStatus('error'); setError(e)
     }
   }
 
-  // reload on pool / key change
-  useEffect(() => { load() /* eslint-disable-next-line */ }, [activeAddr, keyV])
+  // reload on pool change
+  useEffect(() => { load() /* eslint-disable-next-line */ }, [activeAddr])
 
   const maxWin = series ? maxWindowDays(series) : 0
   const live = series ? isLive(series) : false
@@ -88,6 +98,9 @@ export default function App() {
     [series, windowDays]
   )
 
+  const livePools = (pools || []).filter((p) => p.version >= 3)
+  const histPools = (pools || []).filter((p) => p.version < 3)
+
   return (
     <>
       <div className="head">
@@ -99,24 +112,35 @@ export default function App() {
           For any AutoRange (reCLAMM) pool: would you have more value <b>providing liquidity</b> or
           just <b>holding the two tokens</b>? Value-per-share of the pool — which already nets fees,
           impermanent loss and the LVR cost of auto-ranging — against the deposited basket, indexed
-          to 100 at entry. Pick a pool and a look-back window.
+          to 100 at entry. Pool list and data load live from the official Balancer API — no key
+          needed. Pick a pool and a look-back window.
         </p>
       </div>
 
-      <ApiKeyPanel />
-
       <div className="controls">
         <div className="field">
-          <label>Pool</label>
+          <label>Pool {pools ? `(${pools.length} reCLAMM pools)` : '(loading list…)'}</label>
           <select
             value={custom.trim() ? '' : poolAddr}
             onChange={(e) => { setCustom(''); setPoolAddr(e.target.value) }}
+            disabled={!pools}
           >
-            {POOLS.map((p) => (
-              <option key={p.address} value={p.address}>
-                {p.label} · {p.cohort}
-              </option>
-            ))}
+            {livePools.length > 0 && (
+              <optgroup label="Live — May 2026 relaunch">
+                {livePools.map((p) => (
+                  <option key={p.address} value={p.address}>
+                    {p.label}{p.tvl > 0 ? ` · ${fmtUsd(p.tvl)} TVL` : ''}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {histPools.length > 0 && (
+              <optgroup label="Historical — suspended Feb 2026">
+                {histPools.map((p) => (
+                  <option key={p.address} value={p.address}>{p.label}</option>
+                ))}
+              </optgroup>
+            )}
             {custom.trim() ? <option value="">custom address</option> : null}
           </select>
         </div>
@@ -152,32 +176,18 @@ export default function App() {
           <label>&nbsp;</label>
           <button
             className="btn ghost"
-            disabled={!getDuneApiKey() || status === 'loading'}
+            disabled={status === 'loading'}
             onClick={() => load({ force: true })}
-            title={getDuneApiKey() ? 'Run the Dune query fresh' : 'Add a Dune key to refresh'}
+            title="Refetch snapshots and prices from the Balancer API"
           >
             {status === 'loading' ? 'Loading…' : 'Refresh'}
           </button>
         </div>
       </div>
 
-      {usingSample && (
-        <div className="note">
-          Showing a bundled <b>sample snapshot</b> of real on-chain data. Add your Dune API key above
-          to load live data and any other reCLAMM pool.
-        </div>
-      )}
-      {error && error.code === 'NO_KEY' && (
-        <div className="err">
-          This pool isn’t in the bundled sample. Paste a Dune API key above to load it
-          (free tier works — <a href="https://dune.com/settings/api" target="_blank" rel="noreferrer">get one here</a>).
-        </div>
-      )}
-      {error && error.code !== 'NO_KEY' && (
-        <div className="err">{String(error.message || error)}</div>
-      )}
+      {error && <div className="err">{String(error.message || error)}</div>}
 
-      {status === 'loading' && !series && <div className="loading">Running the Dune query…</div>}
+      {status === 'loading' && !series && <div className="loading">Loading from the Balancer API…</div>}
 
       {win && (
         <>
@@ -193,7 +203,7 @@ export default function App() {
           <div className="panel">
             <h2>
               {win.sym0} / {win.sym1} — position value over time
-              <span className="tag">{live ? 'live · trailing from today' : `as of ${win.endDate} (pool retired/suspended)`}</span>
+              <span className="tag">{live ? 'live · trailing from today' : `as of ${win.endDate} (no trading activity since)`}</span>
             </h2>
             <p className="ph">
               $100 entered {win.entryDate}, indexed to 100. The gap between the lines is the LP’s
@@ -216,18 +226,18 @@ export default function App() {
           </div>
 
           <p className="foot">
-            <b>Method:</b> LP value-per-share = TVL / BPT supply, reconstructed from Balancer v3 Vault
-            events; it already nets fees, IL and the LVR cost of auto-ranging (reCLAMM’s range shift is
-            virtual and in-protocol — no keeper or LP gas). HODL = the deposited basket marked with the
-            same prices. <b>Conservative:</b> reserves don’t subtract the protocol-fee skim (true LP drag
-            marginally worse), and any gauge incentives would offset upward — both to be calibrated.
-            {' '}Source:{' '}
+            <b>Method:</b> LP value-per-share = (res₀·p₀ + res₁·p₁) / BPT supply from the Balancer
+            API’s official daily pool snapshots — reserves are subgraph-accurate and already exclude
+            the protocol-fee skim; it nets fees, IL and the LVR cost of auto-ranging (reCLAMM’s range
+            shift is virtual and in-protocol — no keeper or LP gas). HODL = the basket per share at
+            entry, held and marked with the same daily prices (same API). Gauge incentives are not
+            included — where they exist they would lift the LP leg. Cross-check:{' '}
             <a href={DUNE_QUERY_URL} target="_blank" rel="noreferrer">Dune #{DUNE_QUERY_ID}</a>
+            {' '}(independent event-replay reconstruction)
             {' · '}
             <a href={BALANCER_POOL_URL(activeAddr)} target="_blank" rel="noreferrer">Balancer pool</a>
             {' · '}
             <a href={EXPLORER_ADDR(activeAddr)} target="_blank" rel="noreferrer">{shortAddr(activeAddr)}</a>
-            {executedAt ? ` · data ${String(executedAt).slice(0, 10)}` : ''}
           </p>
         </>
       )}

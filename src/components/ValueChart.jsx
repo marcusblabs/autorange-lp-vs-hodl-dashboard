@@ -20,18 +20,19 @@ export default function ValueChart({ pts }) {
   const hd = pts.map((p) => p.hodl)
   const lo = Math.min(...lp, ...hd)
   const hi = Math.max(...lp, ...hd)
-  const pad = Math.max(1.5, (hi - lo) * 0.08)
+  const pad = Math.max(0.25, (hi - lo) * 0.08) // small floor so stable/stable pools aren't a flat line
   const yMin = lo - pad
   const yMax = hi + pad
   const yOf = (v) => P.t + (1 - (v - yMin) / (yMax - yMin)) * (H - P.t - P.b)
 
+  const dp = yMax - yMin < 1 ? 2 : yMax - yMin < 8 ? 1 : 0 // keep tight ranges legible
   const grid = []
   for (let k = 0; k <= 5; k++) {
     const v = yMin + ((yMax - yMin) * k) / 5
     const y = yOf(v)
     grid.push(<line key={'g' + k} className="gl" x1={P.l} y1={y} x2={W - P.r} y2={y} />)
     grid.push(
-      <text key={'yl' + k} className="ax" x={P.l - 8} y={y + 3} textAnchor="end">{v.toFixed(0)}</text>
+      <text key={'yl' + k} className="ax" x={P.l - 8} y={y + 3} textAnchor="end">{v.toFixed(dp)}</text>
     )
   }
   const nx = Math.min(7, n)

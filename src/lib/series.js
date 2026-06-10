@@ -1,8 +1,8 @@
-// Turn the raw daily-state rows from Dune into the LP-vs-HODL comparison.
+// Turn the raw daily-state rows into the LP-vs-HODL comparison.
 //
-// LP leg   : value_per_share(t) = TVL(t) / totalSupply(t)  — already nets fees,
-//            impermanent loss and the LVR cost of auto-ranging (all embedded in
-//            the on-chain reserves).
+// LP leg   : value_per_share(t) = (res0·p0 + res1·p1) / totalSupply(t) — nets
+//            fees, impermanent loss and the LVR cost of auto-ranging (all
+//            embedded in the pool's true reserves).
 // HODL leg : the deposited basket. At entry t0, composition per share is
 //            (res0/bpt, res1/bpt); held forward and marked with the same prices.
 // Both legs are indexed to 100 at the window's entry day, so the gap between
@@ -12,7 +12,26 @@ const DAY_MS = 86400000
 const toMs = (day) => new Date(day + 'T00:00:00Z').getTime()
 export const daysBetween = (a, b) => Math.round((toMs(b) - toMs(a)) / DAY_MS)
 
-/** Parse, sort, dedupe, and trim the post-suspension collapse tail. */
+// A trailing run of ≥ this many days without trading means the pool is
+// suspended or dormant. The run start is kept as the series endpoint; the
+// tail after it carries no fee/LVR information (during a no-swap stretch the
+// LP tracks its own basket exactly, so the gap is frozen by construction).
+//
+// "No trading" is detected on per-share composition: proportional add/remove
+// (the only liquidity ops reCLAMM allows, incl. the post-suspension exits)
+// leaves res/bpt unchanged, while any swap shifts it. This matters: after the
+// Feb-2026 suspension, stragglers kept exiting proportionally for months — an
+// identical-state test would keep that paused coda alive.
+const DORMANT_RUN_DAYS = 10
+const TRADE_EPS = 1e-6
+
+function tradedBetween(a, b) {
+  const d0 = Math.abs(b.res0 / b.bpt - a.res0 / a.bpt) / (Math.abs(a.res0 / a.bpt) || 1)
+  const d1 = Math.abs(b.res1 / b.bpt - a.res1 / a.bpt) / (Math.abs(a.res1 / a.bpt) || 1)
+  return d0 > TRADE_EPS || d1 > TRADE_EPS
+}
+
+/** Parse, sort, dedupe, and trim the trailing no-activity tail. */
 export function normalizeSeries(rows) {
   const pts = (rows || [])
     .map((r) => ({
@@ -33,17 +52,13 @@ export function normalizeSeries(rows) {
   for (const p of pts) byDay.set(p.day, p) // last write per day wins
   const arr = [...byDay.values()]
 
-  // Cut at the first supply "cliff" (>80% single-day drop) — that's the
-  // suspension mass-withdrawal / end-of-life, after which value-per-share is
-  // noise. Gradual removes and the early ramp-up are preserved.
-  let cut = arr.length
-  for (let i = 1; i < arr.length; i++) {
-    if (arr[i].bpt < 0.2 * arr[i - 1].bpt) {
-      cut = i
-      break
-    }
-  }
-  return arr.slice(0, cut)
+  // Trim the dormant tail: walk back while no trading happened vs the
+  // previous day; if that run is long enough, end the series where the last
+  // swap activity was.
+  let runStart = arr.length - 1
+  while (runStart > 0 && !tradedBetween(arr[runStart - 1], arr[runStart])) runStart--
+  if (arr.length - runStart >= DORMANT_RUN_DAYS) return arr.slice(0, runStart + 1)
+  return arr
 }
 
 /** Largest window (in days) the cleaned series can actually support. */
@@ -52,7 +67,7 @@ export function maxWindowDays(series) {
   return daysBetween(series[0].day, series[series.length - 1].day)
 }
 
-/** Is the pool still live (last data point within ~4 days of now)? */
+/** Is the pool still trading (last kept data point within ~4 days of now)? */
 export function isLive(series, nowMs = Date.now()) {
   if (!series.length) return false
   return nowMs - toMs(series[series.length - 1].day) <= 4 * DAY_MS
