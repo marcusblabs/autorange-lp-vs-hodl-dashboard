@@ -93,6 +93,26 @@ svg { width: 100%; display: block; overflow: visible; }
 .ax { fill: var(--muted); font-size: 10.5px; }
 .gl { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.55; }
 
+/* ---- chart hover ---- */
+.chartwrap { position: relative; }
+.cross line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.65; }
+.tip {
+  position: absolute; top: 6px; transform: translateX(-50%);
+  pointer-events: none; z-index: 2;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px 9px; box-shadow: var(--elev);
+  font-size: 11.5px; line-height: 1.45; white-space: nowrap;
+}
+.tip.flip { transform: translateX(-100%) translateX(-10px); }
+.tip-d { color: var(--muted); font-size: 10.5px; font-weight: 600; margin-bottom: 3px; }
+.tip-r { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.tip-r b { color: var(--text); font-weight: 600; margin-left: auto; padding-left: 12px; }
+.tip-r .dot { width: 8px; height: 8px; margin-right: 2px; }
+.tip-g { color: var(--muted); margin-top: 3px; }
+.tip-g b { font-weight: 600; }
+.tip-g b.pos { color: var(--green); }
+.tip-g b.neg { color: var(--red); }
+
 /* ---- misc ---- */
 .tag { display: inline-block; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; font-size: 11px; color: var(--muted); margin-left: 8px; vertical-align: middle; -webkit-text-fill-color: var(--muted); }
 .foot { color: var(--muted); font-size: 11.5px; line-height: 1.6; margin-top: 4px; }

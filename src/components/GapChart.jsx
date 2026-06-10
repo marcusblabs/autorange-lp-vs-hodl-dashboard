@@ -1,13 +1,12 @@
 import React from 'react'
-import { fmtDateShort } from '../lib/format'
-
-const W = 1020
-const P = { l: 46, r: 14, t: 14, b: 26 }
-const xAt = (i, n) => P.l + (n <= 1 ? 0 : (i * (W - P.l - P.r)) / (n - 1))
+import { fmtDate, fmtDateShort, fmtPct } from '../lib/format'
+import { W, P, xAt, xPct } from '../lib/chartGeom'
+import { useHoverIndex } from './useHoverIndex'
 
 export default function GapChart({ pts }) {
   const H = 190
   const n = pts.length
+  const { ref, idx, onMove, onLeave } = useHoverIndex(n)
   const g = pts.map((p) => p.gap)
   const lo = Math.min(...g, 0)
   const hi = Math.max(...g, 0)
@@ -40,13 +39,29 @@ export default function GapChart({ pts }) {
   const area = d + 'L' + xAt(n - 1, n) + ' ' + yOf(0) + ' L' + xAt(0, n) + ' ' + yOf(0) + ' Z'
   const yz = yOf(0)
 
+  const hov = idx != null ? pts[idx] : null
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`}>
-      {grid}
-      {xt}
-      <path d={area} fill="#f2636e" opacity="0.1" />
-      <line x1={P.l} y1={yz} x2={W - P.r} y2={yz} stroke="#9aa4b2" strokeWidth="1" opacity="0.5" />
-      <path d={d} fill="none" stroke="#f2636e" strokeWidth="2.1" strokeLinejoin="round" />
-    </svg>
+    <div className="chartwrap">
+      <svg ref={ref} viewBox={`0 0 ${W} ${H}`} onMouseMove={onMove} onMouseLeave={onLeave}>
+        {grid}
+        {xt}
+        <path d={area} fill="#f2636e" opacity="0.1" />
+        <line x1={P.l} y1={yz} x2={W - P.r} y2={yz} stroke="#9aa4b2" strokeWidth="1" opacity="0.5" />
+        <path d={d} fill="none" stroke="#f2636e" strokeWidth="2.1" strokeLinejoin="round" />
+        {hov && (
+          <g className="cross" pointerEvents="none">
+            <line x1={xAt(idx, n)} y1={P.t} x2={xAt(idx, n)} y2={H - P.b} />
+            <circle cx={xAt(idx, n)} cy={yOf(hov.gap)} r="3.6" fill="#f2636e" stroke="var(--panel)" strokeWidth="1.4" />
+          </g>
+        )}
+      </svg>
+      {hov && (
+        <div className={'tip' + (xPct(idx, n) > 62 ? ' flip' : '')} style={{ left: xPct(idx, n) + '%' }}>
+          <div className="tip-d">{fmtDate(hov.day)}</div>
+          <div className="tip-g">LP − HODL <b className={hov.gap >= 0 ? 'pos' : 'neg'}>{fmtPct(hov.gap)}</b></div>
+        </div>
+      )}
+    </div>
   )
 }
