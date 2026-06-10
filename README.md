@@ -1,7 +1,7 @@
 # AutoRange — LP vs HODL
 
 A dashboard that answers one question for any Balancer v3 **AutoRange (reCLAMM)** pool on
-Ethereum: over the last 1 / 7 / 14 / 30 / 60 / 90 / 180 days, would you have had more value
+any chain: over the last 1 / 7 / 14 / 30 / 60 / 90 / 180 days, would you have had more value
 **providing liquidity** or just **holding the two tokens**?
 
 Live: https://marcusblabs.github.io/autorange-lp-vs-hodl-dashboard/
@@ -11,9 +11,12 @@ Live: https://marcusblabs.github.io/autorange-lp-vs-hodl-dashboard/
 Everything loads live from the official **Balancer API** (`api-v3.balancer.fi/graphql`) —
 no API key, no backend:
 
-- `poolGetPools` (type `RECLAMM`, Ethereum) — the selectable pool list, TVL-sorted, refreshed
-  on every visit. Delisted historical pools (e.g. GHO/WETH) are kept via a curated extras list;
-  their snapshots remain queryable.
+- `poolGetPools` (type `RECLAMM`, all chains) — the selectable pool list, TVL-sorted and
+  refreshed on every visit. Only **live** pools are listed: contract `version >= 3` (the
+  May-2026 relaunch generation — every v1/v2 pool has had zero volume since the Feb-2026
+  suspension) with TVL above a $50 dust floor (drops seeded-then-drained test pools).
+  Deprecated/historical pools stay reachable through the custom-address input, which
+  resolves the chain automatically via an `idIn` lookup.
 - `poolGetSnapshots` — per-day token reserves and BPT total supply for the selected pool.
 - `tokenGetHistoricalPrices` — daily USD closes for the two tokens (same source as the TVL
   figures, so both legs are marked consistently).
@@ -31,8 +34,14 @@ pools is instant.
   `(res0/bpt, res1/bpt)`; it's held forward and marked with the *same* daily prices.
 - Both legs are indexed to 100 at entry, so the gap between them is the LP's fee-minus-LVR result.
 - Days without a snapshot mean no pool activity; reserves and supply are forward-filled exactly.
-- A trailing run of ≥10 days with identical reserves and supply (suspension / dormancy) is
-  trimmed — a frozen pool earns no fees and pays no LVR, so the flat tail carries no information.
+- A trailing run of ≥10 days without trading is trimmed. "No trading" is detected on per-share
+  composition (`res/bpt`): proportional add/remove — the only liquidity ops reCLAMM allows,
+  including post-suspension exits — leaves it unchanged, while any swap shifts it. A frozen pool
+  earns no fees and pays no LVR, so the tail carries no information.
+- Supply-collapse guard: the series is cut where BPT supply falls below 1e-6 of its running max.
+  A pool drained to dust shares makes value-per-share degenerate (a seeded-then-drained test pool
+  showed a 2.5e15× fake "LP return"); real mass exits never go that deep (the Feb-2026
+  withdrawal left 0.9% of max supply).
 
 ### Why snapshots, not event replay
 

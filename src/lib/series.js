@@ -50,7 +50,21 @@ export function normalizeSeries(rows) {
   pts.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
   const byDay = new Map()
   for (const p of pts) byDay.set(p.day, p) // last write per day wins
-  const arr = [...byDay.values()]
+  let arr = [...byDay.values()]
+
+  // Supply-collapse guard: a pool drained to dust shares makes the
+  // value-per-share denominator degenerate (a seeded-then-drained test pool
+  // showed a 2.5e15x fake "LP return"). Cut at the first day supply falls
+  // below 1e-6 of its running max — real exits never go that deep (the
+  // Feb-2026 mass withdrawal left 0.9% of max supply).
+  let maxBpt = 0
+  for (let i = 0; i < arr.length; i++) {
+    maxBpt = Math.max(maxBpt, arr[i].bpt)
+    if (arr[i].bpt < 1e-6 * maxBpt) {
+      arr = arr.slice(0, i)
+      break
+    }
+  }
 
   // Trim the dormant tail: walk back while no trading happened vs the
   // previous day; if that run is long enough, end the series where the last

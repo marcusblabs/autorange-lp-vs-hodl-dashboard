@@ -2,8 +2,8 @@
  * Balancer official API (api-v3.balancer.fi) — the data backbone.
  *
  * Pool list, daily snapshots (reserves + BPT supply) and historical USD
- * prices all come from the same free GraphQL endpoint. No API key, no
- * execute/poll round-trips, CORS open to any origin.
+ * prices all come from the same free GraphQL endpoint, for every chain
+ * Balancer v3 runs on. No API key, no execute/poll round-trips, CORS open.
  *
  * Why snapshots and not event replay: the API's snapshots come from the
  * official subgraph, whose reserves already exclude the aggregate
@@ -11,12 +11,18 @@
  * reserves by the uncollected skim — small while supply is large, but it
  * produces a fake +22% value-per-share jump across the Feb-2026
  * suspension exits (verified on AAVE/WETH). The Dune query in query/ is
- * kept as an independent cross-check of that effect.
+ * kept as an independent cross-check of that effect (Ethereum only).
  */
 
 const API = 'https://api-v3.balancer.fi/graphql'
 const TTL_MS = 10 * 60 * 1000 // session cache: fresh enough for daily data
 const DAY_MS = 86400000
+
+// "Live" = relaunch-generation contracts with real liquidity. Every v1/v2
+// reCLAMM shows vol24h = $0 since the Feb-2026 suspension; the TVL floor
+// drops seeded-then-drained dust pools (degenerate value-per-share).
+const LIVE_MIN_VERSION = 3
+const LIVE_MIN_TVL_USD = 50
 
 async function gql(query) {
   const res = await fetch(API, {
@@ -49,25 +55,31 @@ function cacheSet(key, v) {
   }
 }
 
-/** Every reCLAMM pool the API lists on Ethereum mainnet, TVL-sorted. */
+/** Live reCLAMM pools across all Balancer chains, TVL-sorted. */
 export async function fetchReclammPools({ force = false } = {}) {
-  const KEY = 'ar.pools.v2'
+  const KEY = 'ar.pools.v3'
   if (!force) {
     const hit = cacheGet(KEY)
     if (hit) return hit
   }
   const data = await gql(`{
-    poolGetPools(where: {chainIn: [MAINNET], poolTypeIn: [RECLAMM]},
+    poolGetPools(where: {poolTypeIn: [RECLAMM]},
                  orderBy: totalLiquidity, orderDirection: desc) {
-      address version
+      address chain version
       dynamicData { totalLiquidity totalShares }
       poolTokens { symbol }
     }
   }`)
   const pools = (data.poolGetPools || [])
-    .filter((p) => +p.dynamicData?.totalShares > 0)
+    .filter(
+      (p) =>
+        p.version >= LIVE_MIN_VERSION &&
+        +p.dynamicData?.totalShares > 0 &&
+        +p.dynamicData?.totalLiquidity >= LIVE_MIN_TVL_USD
+    )
     .map((p) => ({
       address: p.address.toLowerCase(),
+      chain: p.chain,
       label: p.poolTokens.map((t) => t.symbol).join(' / '),
       version: p.version,
       tvl: +p.dynamicData.totalLiquidity || 0,
@@ -76,32 +88,42 @@ export async function fetchReclammPools({ force = false } = {}) {
   return pools
 }
 
+/** Find which chain a pool address lives on (any version, any chain). */
+export async function resolvePool(address) {
+  const addr = address.toLowerCase()
+  const data = await gql(`{
+    poolGetPools(where: {idIn: ["${addr}"]}) { address chain type version }
+  }`)
+  const hit = (data.poolGetPools || []).find((p) => p.address.toLowerCase() === addr)
+  return hit ? { chain: hit.chain, type: hit.type, version: hit.version } : null
+}
+
 const toDay = (tsSec) => new Date(+tsSec * 1000).toISOString().slice(0, 10)
 
 /**
- * Daily raw-state rows for one pool, same shape the old Dune query
- * returned: {day, sym0, sym1, res0, res1, bpt, price0, price1, tvl_usd}.
+ * Daily raw-state rows for one pool on one chain:
+ * {day, sym0, sym1, res0, res1, bpt, price0, price1, tvl_usd}.
  *
  * Gap handling: days with no snapshot mean no pool activity, so reserves
  * and supply are forward-filled exactly; prices exist for every day.
  * tokenGetHistoricalPrices is capped at ONE_YEAR — fine while every
  * reCLAMM is younger than that (oldest: 2025-07-31); revisit mid-2026.
  */
-export async function fetchPoolSeries(address, { force = false } = {}) {
+export async function fetchPoolSeries(address, chain, { force = false } = {}) {
   const addr = address.toLowerCase()
-  const KEY = 'ar.series.v2.' + addr
+  const KEY = `ar.series.v3.${chain}.${addr}`
   if (!force) {
     const hit = cacheGet(KEY)
     if (hit) return hit
   }
 
   const meta = await gql(`{
-    poolGetPool(id: "${addr}", chain: MAINNET) {
+    poolGetPool(id: "${addr}", chain: ${chain}) {
       type poolTokens { index address symbol }
     }
   }`)
   const pool = meta.poolGetPool
-  if (!pool) throw new Error('Pool not found on Ethereum mainnet.')
+  if (!pool) throw new Error(`Pool not found on ${chain}.`)
   if (pool.type !== 'RECLAMM') {
     throw new Error(`Not an AutoRange (reCLAMM) pool — the Balancer API reports type ${pool.type}.`)
   }
@@ -110,14 +132,14 @@ export async function fetchPoolSeries(address, { force = false } = {}) {
 
   const [snapData, pxData] = await Promise.all([
     gql(`{
-      poolGetSnapshots(id: "${addr}", chain: MAINNET, range: ALL_TIME) {
+      poolGetSnapshots(id: "${addr}", chain: ${chain}, range: ALL_TIME) {
         timestamp totalShares amounts
       }
     }`),
     gql(`{
       tokenGetHistoricalPrices(
         addresses: ["${toks[0].address}", "${toks[1].address}"],
-        chain: MAINNET, range: ONE_YEAR
+        chain: ${chain}, range: ONE_YEAR
       ) { address prices { timestamp price } }
     }`),
   ])
