@@ -140,9 +140,22 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
     return [...c.entries()].sort((a, b) => b[1] - a[1])
   }, [rows])
 
-  const filtered = useMemo(() => {
+  const matchesQuery = (r, q) =>
+    !q ||
+    r.label.toLowerCase().includes(q) ||
+    (r.name || '').toLowerCase().includes(q) ||
+    chainName(r.chain).toLowerCase().includes(q) ||
+    (TYPE_LABEL[r.type] || r.type).toLowerCase().includes(q) ||
+    r.address.includes(q)
+
+  // A pool you searched for by name or address must never come back empty just
+  // because a default filter excluded it. Typing a query therefore lifts the
+  // SHOW filter — an idle or flagged row still arrives carrying its badge, so
+  // nothing is silently misrepresented, it is simply findable.
+  const { filtered, hiddenByFilters } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const allowed = (r) => {
+      if (q) return true
       const flagged = !!r.flags?.length
       if (show === 'ALL') return true
       if (show === 'LIVE') return r.live && !flagged
@@ -150,19 +163,15 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
       if (show === 'FLAGGED') return r.live || flagged
       return true
     }
-    return rows.filter(
+    const matches = rows.filter((r) => matchesQuery(r, q))
+    const out = matches.filter(
       (r) =>
         allowed(r) &&
         (chain === 'ALL' || r.chain === chain) &&
         (type === 'ALL' || r.type === type) &&
-        r.tvl >= minTvl &&
-        (!q ||
-          r.label.toLowerCase().includes(q) ||
-          (r.name || '').toLowerCase().includes(q) ||
-          chainName(r.chain).toLowerCase().includes(q) ||
-          (TYPE_LABEL[r.type] || r.type).toLowerCase().includes(q) ||
-          r.address.includes(q))
+        r.tvl >= minTvl
     )
+    return { filtered: out, hiddenByFilters: matches.length - out.length }
   }, [rows, query, minTvl, chain, type, show])
 
   const sorted = useMemo(() => {
@@ -290,6 +299,16 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         )}
       </div>
 
+      {hiddenByFilters > 0 && (
+        <div className="hint">
+          <b>{hiddenByFilters}</b> more {hiddenByFilters === 1 ? 'pool matches' : 'pools match'} but{' '}
+          {hiddenByFilters === 1 ? 'is' : 'are'} hidden by the chain, type or min-TVL filter.
+          <button className="fbtn" onClick={() => { setChain('ALL'); setType('ALL'); setMinTvl(0) }}>
+            [ SHOW THEM ]
+          </button>
+        </div>
+      )}
+
       <div className="tablewrap">
         <table className="pooltable">
           <thead>
@@ -369,7 +388,15 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
             })}
           </tbody>
         </table>
-        {!sorted.length && <div className="loading">No pools match those filters.</div>}
+        {!sorted.length && (
+          <div className="loading">
+            No pools match those filters.
+            {' '}
+            <button className="fbtn" onClick={() => { setQuery(''); setChain('ALL'); setType('ALL'); setMinTvl(0); setShow('ALL') }}>
+              [ CLEAR FILTERS ]
+            </button>
+          </div>
+        )}
       </div>
 
       <p className="foot">

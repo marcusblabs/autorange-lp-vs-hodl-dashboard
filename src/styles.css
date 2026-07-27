@@ -244,3 +244,8 @@ table.pooltable { width: 100%; border-collapse: collapse; font-size: 13px; }
 .pooltable th .arrow { opacity: 0.55; }
 .pooltable th.sorted .arrow { opacity: 1; color: var(--purple-soft); }
 .mini.boost { background: rgba(127, 106, 232, 0.16); border-color: rgba(127, 106, 232, 0.5); color: var(--purple-soft); }
+.hint {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: rgba(127, 106, 232, 0.09); border: 1px solid rgba(127, 106, 232, 0.32);
+  color: #cfc7f4; border-radius: 6px; padding: 8px 12px; font-size: 12.5px; margin-bottom: 12px;
+}
