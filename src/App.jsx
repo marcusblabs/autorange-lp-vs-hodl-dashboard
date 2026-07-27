@@ -152,6 +152,8 @@ export default function App() {
           <PoolTable
             rows={scan.rows}
             generatedAt={scan.generatedAt}
+            blacklistedCount={scan.blacklistedCount}
+            excludedChains={scan.excludedChains}
             onSelect={(r) => setTarget({ address: r.address, chain: r.chain })}
           />
         )}

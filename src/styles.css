@@ -129,9 +129,6 @@ svg { width: 100%; display: block; overflow: visible; }
 }
 
 /* ---- scan table ---- */
-.tablebar {
-  display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 4px 0 14px;
-}
 .search {
   background: var(--panel); color: var(--text); border: 1px solid var(--line);
   border-radius: 6px; padding: 9px 12px; font-family: inherit; font-size: 13.5px;
@@ -189,3 +186,60 @@ table.pooltable { width: 100%; border-collapse: collapse; font-size: 13px; }
 .mini.flag { background: rgba(242, 99, 110, 0.14); border-color: rgba(242, 99, 110, 0.45); color: var(--red); }
 .btn.small { padding: 6px 10px; font-size: 12px; }
 .btn.ghost.on { border-color: var(--purple); color: var(--purple-soft); }
+
+/* ---- stat strip + filter bar (Pool Explorer style) ---- */
+.statstrip {
+  display: flex; flex-wrap: wrap; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--elev); margin: 4px 0 12px; overflow: hidden;
+}
+.statstrip > div {
+  flex: 1 1 150px; padding: 11px 16px; border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.statstrip > div:last-child { border-right: 0; }
+.statstrip .sl {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--muted);
+}
+.statstrip .sv { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.statstrip .sv.sm { font-size: 15px; font-weight: 600; }
+.statstrip .sv-sub { font-size: 13px; font-weight: 500; color: var(--muted); }
+
+.tablebar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 4px 0 14px; }
+
+.fbar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--elev); padding: 9px 12px; margin-bottom: 14px;
+}
+.fbar .prompt { color: var(--purple); font-weight: 700; font-size: 13px; }
+.fsearch {
+  flex: 1 1 240px; min-width: 190px; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px;
+  font-family: inherit; font-size: 12.5px; outline: none;
+}
+.fsearch:focus { border-color: var(--purple); }
+.fgroup { display: inline-flex; align-items: stretch; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.fgroup .flabel {
+  background: var(--panel2); color: var(--muted); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.06em; padding: 6px 7px; display: flex; align-items: center;
+  border-right: 1px solid var(--line); white-space: nowrap;
+}
+.fgroup select {
+  background: transparent; border: 0; color: var(--text); font-family: inherit;
+  font-size: 12px; font-weight: 600; padding: 5px 6px; min-width: 0; outline: none; cursor: pointer;
+}
+.fbtn {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--purple-soft);
+  border-radius: 5px; padding: 6px 10px; font-family: inherit; font-size: 11.5px;
+  font-weight: 700; letter-spacing: 0.04em; cursor: pointer; white-space: nowrap;
+}
+.fbtn:hover { border-color: var(--purple); color: #fff; }
+.fbtn:disabled { opacity: 0.4; cursor: default; }
+
+.chaintag {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--purple-soft);
+}
+.pooltable th .arrow { opacity: 0.55; }
+.pooltable th.sorted .arrow { opacity: 1; color: var(--purple-soft); }

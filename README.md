@@ -6,7 +6,13 @@ the last 30 / 90 / 180 days, would you have had more value **providing liquidity
 **holding the tokens** you would have deposited?
 
 The landing page is a sortable, filterable **table of every pool** so the answer is scannable
-at a glance. Click any row — or paste a `balancer.fi` pool link — for the full chart.
+at a glance — filters for chain, pool type, min TVL and status, plus CSV export, matching the
+[Pool Explorer](https://marcusblabs.github.io/balancer-pool-explorer/). Click any row — or paste
+a `balancer.fi` pool link — for the full chart.
+
+Columns run **30d / 90d / 180d / Full**. The Full (whole-life) column matters because many pools
+are younger than 30 days — every relaunched AutoRange pool is — so the fixed windows are blank
+for them and Full is the only figure they can report.
 
 Live: https://marcusblabs.github.io/autorange-lp-vs-hodl-dashboard/
 
@@ -15,7 +21,18 @@ Live: https://marcusblabs.github.io/autorange-lp-vs-hodl-dashboard/
 Everything comes from the official **Balancer API** (`api-v3.balancer.fi/graphql`) — no API
 key, no backend:
 
-- `poolGetPools` (protocol version 3, all chains, TVL ≥ $1k) — the pool universe, ~174 pools.
+- `poolGetPools` (protocol version 3, TVL ≥ $1k) — the pool universe, ~143 pools after exclusions.
+  - **Balancer's own blacklist** is applied at source (`tagNotIn: ["BLACK_LISTED"]`). It is the
+    front end's curation and is strictly better than any heuristic for what it covers — test
+    pools, dust, and token families with known-bad feeds. It caught 13 pools our data checks
+    missed, several above $1M TVL. It is *not* a superset though: most pools we flag for
+    implausible prices are not blacklisted, and several are explicitly `reviewedOnly` yet carry
+    133× oracle drift. Reviewed means the contract was looked at, not that the oracle is sane —
+    so both filters run.
+  - Sonic, Mode, Fraxtal and the Sepolia testnet are excluded via `chainNotIn`.
+  - Caveat: the `categories` field **cannot be selected** — the server returns values (e.g.
+    `POINTS_MAINSTREET`) missing from its own published enum, so GraphQL fails to serialise the
+    response. The `tagIn` / `tagNotIn` filters work fine.
 - `poolGetSnapshots` — per-day token reserves and BPT total supply.
 - `tokenGetHistoricalPrices` — daily USD closes for every token in the pool (same source as
   the TVL figures, so both legs are marked consistently).

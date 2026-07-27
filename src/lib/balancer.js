@@ -22,6 +22,10 @@
  * so a repeat of the same call drops to ~190ms.
  */
 
+// Explicit .js extension: scripts/scan.mjs imports this module in plain Node,
+// which (unlike Vite) will not resolve an extensionless path.
+import { EXCLUDED_CHAINS } from '../config.js'
+
 const API = 'https://api-v3.balancer.fi/graphql'
 const TTL_MS = 10 * 60 * 1000 // session cache: fresh enough for daily data
 const DAY_MS = 86400000
@@ -128,22 +132,56 @@ function summarizeAprs(items) {
   return { yieldApr, incentiveApr }
 }
 
-/** Every Balancer v3 pool above the dust floor, across all chains, TVL-sorted. */
+/**
+ * Every Balancer v3 pool above the dust floor, across all chains, TVL-sorted —
+ * minus the ones Balancer itself blacklists.
+ *
+ * The blacklist is the front-end's own curation (`BLACK_LISTED` tag) and it is
+ * strictly better than any heuristic for the cases it covers: test pools, dust,
+ * and pools built on token families whose price feeds are known-bad. It caught
+ * 13 pools our own data checks missed, including several above $1M TVL.
+ *
+ * It is not a superset though, so the scan keeps its own checks too: the
+ * majority of pools we flag for implausible price data are NOT blacklisted,
+ * and several are explicitly `reviewedOnly` yet still carry a 133x price drift.
+ * Reviewed means the contract was looked at, not that the oracle is sane.
+ *
+ * NB: the `categories` field cannot be selected — the server returns values
+ * (e.g. POINTS_MAINSTREET) that are missing from its own published enum, so
+ * GraphQL fails to serialise the response. The tagIn/tagNotIn filters work.
+ */
 export async function fetchAllPools({ force = false } = {}) {
-  const KEY = 'ar.pools.all.v1'
+  const KEY = 'ar.pools.all.v2'
   if (!force) {
     const hit = cacheGet(KEY)
     if (hit) return hit
   }
-  const data = await gql(`{
-    poolGetPools(first: 1000, orderBy: totalLiquidity, orderDirection: desc,
-                 where: {protocolVersionIn: [3], minTvl: ${SCAN_MIN_TVL_USD}}) {
-      address chain type version name
-      dynamicData { totalLiquidity swapFee aprItems { title apr type } }
-      poolTokens { index address symbol weight }
-    }
-  }`)
-  const pools = (data.poolGetPools || []).map((p) => {
+  const [data, reviewedData, blacklisted] = await Promise.all([
+    gql(`{
+      poolGetPools(first: 1000, orderBy: totalLiquidity, orderDirection: desc,
+                   where: {protocolVersionIn: [3], minTvl: ${SCAN_MIN_TVL_USD},
+                           chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
+                           tagNotIn: ["BLACK_LISTED"]}) {
+        address chain type version name
+        dynamicData { totalLiquidity swapFee aprItems { title apr type } }
+        poolTokens { index address symbol weight }
+      }
+    }`),
+    gql(`{
+      poolGetPools(first: 1000, where: {protocolVersionIn: [3], minTvl: ${SCAN_MIN_TVL_USD}, chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
+                                        reviewedOnly: true}) { address }
+    }`),
+    gql(`{
+      poolGetPools(first: 1000, where: {protocolVersionIn: [3], minTvl: ${SCAN_MIN_TVL_USD}, chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
+                                        tagIn: ["BLACK_LISTED"]}) { address }
+    }`),
+  ])
+  const reviewed = new Set(
+    (reviewedData.poolGetPools || []).map((p) => p.address.toLowerCase())
+  )
+  const blacklistedCount = (blacklisted.poolGetPools || []).length
+
+  const list = (data.poolGetPools || []).map((p) => {
     const tokens = [...p.poolTokens].sort((a, b) => a.index - b.index)
     const { yieldApr, incentiveApr } = summarizeAprs(p.dynamicData?.aprItems)
     return {
@@ -162,10 +200,14 @@ export async function fetchAllPools({ force = false } = {}) {
         symbol: t.symbol,
         weight: t.weight == null ? null : +t.weight,
       })),
+      // Balancer looked at the contract. It does NOT imply the price feed is
+      // sane — several reviewed pools carry 100x+ oracle drift.
+      reviewed: reviewed.has(p.address.toLowerCase()),
     }
   })
-  cacheSet(KEY, pools)
-  return pools
+  const out = { pools: list, blacklistedCount, excludedChains: EXCLUDED_CHAINS }
+  cacheSet(KEY, out)
+  return out
 }
 
 /** Find which chain a pool address lives on (any version, any chain). */

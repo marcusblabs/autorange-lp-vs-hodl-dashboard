@@ -11,7 +11,9 @@ export const WINDOWS = [1, 7, 14, 30, 60, 90, 180]
 // Precomputed scan table (scripts/scan.mjs → public/scan.json, refreshed
 // nightly by CI). Served from the app's own base path so it works both at the
 // dev root and under the GitHub Pages subpath.
-export const SCAN_URL = `${import.meta.env.BASE_URL}scan.json`
+// Optional chaining because scripts/scan.mjs pulls this module into plain
+// Node (for EXCLUDED_CHAINS), where Vite's import.meta.env does not exist.
+export const SCAN_URL = `${import.meta.env?.BASE_URL ?? '/'}scan.json`
 
 // Per-chain display name, Balancer UI slug, and explorer address URL.
 // Chains without an entry fall back to the Balancer pool page only.
@@ -28,7 +30,19 @@ export const CHAIN_INFO = {
   PLASMA: { name: 'Plasma', slug: 'plasma', explorer: 'https://plasmascan.to/address/' },
 }
 
+// Chains deliberately left out of the scan. SEPOLIA is a testnet; the rest are
+// excluded by choice. Applied server-side via the `chainNotIn` filter.
+export const EXCLUDED_CHAINS = ['SONIC', 'MODE', 'FRAXTAL', 'SEPOLIA']
+
 export const chainName = (c) => CHAIN_INFO[c]?.name || c
+
+// Short codes for dense table cells, matching the Pool Explorer's style.
+export const CHAIN_SHORT = {
+  MAINNET: 'ETH', ARBITRUM: 'ARB', BASE: 'BASE', GNOSIS: 'GNO', OPTIMISM: 'OP',
+  AVALANCHE: 'AVAX', MONAD: 'MON', PLASMA: 'PLAS', HYPEREVM: 'HYPE',
+  SONIC: 'SONIC', POLYGON: 'POLY', ZKEVM: 'ZKEVM', FRAXTAL: 'FRAX', MODE: 'MODE',
+}
+export const chainShort = (c) => CHAIN_SHORT[c] || String(c).slice(0, 4)
 export const BALANCER_POOL_URL = (chain, a) =>
   `https://balancer.fi/pools/${CHAIN_INFO[chain]?.slug || String(chain).toLowerCase()}/v3/${a}`
 export const EXPLORER_ADDR = (chain, a) =>

@@ -132,8 +132,9 @@ function priceDrift(series) {
 
 const started = Date.now()
 console.log('fetching pool list…')
-const pools = await fetchAllPools({ force: true })
+const { pools, blacklistedCount, excludedChains } = await fetchAllPools({ force: true })
 console.log(`  ${pools.length} v3 pools with TVL >= $${SCAN_MIN_TVL_USD.toLocaleString()}`)
+console.log(`  excluded: ${blacklistedCount} blacklisted by Balancer · chains ${excludedChains.join(', ')}`)
 
 let done = 0
 const results = await scanPools(pools, {
@@ -157,6 +158,18 @@ for (const r of results) {
   if (series.length < 2) { skipped.thin++; continue }
 
   const s = summarize(series, WINDOWS)
+  const packWindow = (c) =>
+    c
+      ? {
+          gap: +c.gapFinal.toFixed(3),
+          lp: +c.lpFinal.toFixed(2),
+          hodl: +c.hodlFinal.toFixed(2),
+          fees: +c.feePct.toFixed(3),
+          drag: +c.dragPct.toFixed(3),
+          entry: c.entryDate,
+          days: c.availDays,
+        }
+      : null
 
   // --- trust flags (see the block comment above) ---
   const flags = []
@@ -184,19 +197,11 @@ for (const r of results) {
   }
 
   const win = {}
-  for (const w of WINDOWS) {
-    const c = s.byWindow[w]
-    win[w] = c
-      ? {
-          gap: +c.gapFinal.toFixed(3),
-          lp: +c.lpFinal.toFixed(2),
-          hodl: +c.hodlFinal.toFixed(2),
-          fees: +c.feePct.toFixed(3),
-          drag: +c.dragPct.toFixed(3),
-          entry: c.entryDate,
-        }
-      : null
-  }
+  for (const w of WINDOWS) win[w] = packWindow(s.byWindow[w])
+  // Whole-life result. Many pools — the relaunched AutoRange ones especially —
+  // are younger than 30 days, so every fixed window is blank for them. This
+  // column guarantees each row still says something.
+  win.full = packWindow(s.full)
   rows.push({
     address: pool.address,
     chain: pool.chain,
@@ -208,6 +213,7 @@ for (const r of results) {
     yieldApr: +(pool.yieldApr || 0).toFixed(5),
     incentiveApr: +(pool.incentiveApr || 0).toFixed(5),
     nTokens: pool.tokens.length,
+    reviewed: pool.reviewed,
     maxWin: s.maxWin,
     live: s.live,
     // Windows are measured back from a pool's LAST TRADING DAY, not from
@@ -225,6 +231,8 @@ const out = {
   generatedAt: new Date().toISOString(),
   windows: WINDOWS,
   minTvl: SCAN_MIN_TVL_USD,
+  excludedChains,
+  blacklistedCount,
   counts: { listed: pools.length, usable: rows.length, ...skipped },
   rows,
 }
