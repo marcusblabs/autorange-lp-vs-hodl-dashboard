@@ -39,7 +39,11 @@ export default function App() {
   // ---- the precomputed scan table ----
   useEffect(() => {
     let on = true
-    fetch(SCAN_URL)
+    // 'no-cache' revalidates instead of serving a stale copy: the browser sends
+    // the ETag and gets a cheap 304 when nothing changed, but picks up the new
+    // file the moment CI refreshes it. Without this a returning visitor keeps
+    // whatever scan.json they cached and never sees the nightly rebuild.
+    fetch(SCAN_URL, { cache: 'no-cache' })
       .then((r) => {
         if (!r.ok) throw new Error(`scan.json ${r.status}`)
         return r.json()
