@@ -116,10 +116,40 @@ async function mapLimit(items, limit, fn) {
   return out
 }
 
+/** Every address whose price series a pool needs: its tokens + underlyings. */
+const tokenPriceAddresses = (tokens) => [
+  ...new Set(tokens.flatMap((t) => (t.underlying ? [t.address, t.underlying.address] : [t.address]))),
+]
+
 const chunk = (arr, n) => {
   const out = []
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n))
   return out
+}
+
+/**
+ * Normalise one pool token.
+ *
+ * `underlying` is the asset an LP actually brings for a boosted (ERC4626)
+ * token — USDC rather than waEthUSDC — and drives the "vs underlying" HODL
+ * basis. null means the token is its own underlying.
+ *
+ * We deliberately do NOT use the API's `priceRate` to convert: for a plain
+ * ERC4626 wrapper it equals the wrapper rate, but rate providers can fold in
+ * other things. waBasEURC reports priceRate 1.1753 while its true wrapper rate
+ * is 1.0307 — the difference is the EUR/USD rate baked into the provider. The
+ * ratio of the two USD price series is the honest conversion.
+ */
+function mapToken(t) {
+  return {
+    address: t.address.toLowerCase(),
+    symbol: t.symbol,
+    weight: t.weight == null ? null : +t.weight,
+    underlying:
+      t.isErc4626 && t.underlyingToken
+        ? { address: t.underlyingToken.address.toLowerCase(), symbol: t.underlyingToken.symbol }
+        : null,
+  }
 }
 
 function summarizeAprs(items) {
@@ -164,7 +194,7 @@ export async function fetchAllPools({ force = false } = {}) {
                            tagNotIn: ["BLACK_LISTED"]}) {
         address chain type version name
         dynamicData { totalLiquidity swapFee aprItems { title apr type } }
-        poolTokens { index address symbol weight }
+        poolTokens { index address symbol weight isErc4626 underlyingToken { address symbol } }
       }
     }`),
     gql(`{
@@ -195,11 +225,7 @@ export async function fetchAllPools({ force = false } = {}) {
       swapFee: +p.dynamicData?.swapFee || 0,
       yieldApr,
       incentiveApr,
-      tokens: tokens.map((t) => ({
-        address: t.address.toLowerCase(),
-        symbol: t.symbol,
-        weight: t.weight == null ? null : +t.weight,
-      })),
+      tokens: tokens.map(mapToken),
       // Balancer looked at the contract. It does NOT imply the price feed is
       // sane — several reviewed pools carry 100x+ oracle drift.
       reviewed: reviewed.has(p.address.toLowerCase()),
@@ -229,7 +255,7 @@ export async function fetchPoolMeta(address, chain) {
     poolGetPool(id: "${addr}", chain: ${chain}) {
       type name
       dynamicData { totalLiquidity swapFee aprItems { title apr type } }
-      poolTokens { index address symbol weight }
+      poolTokens { index address symbol weight isErc4626 underlyingToken { address symbol } }
     }
   }`)
   const p = data.poolGetPool
@@ -246,11 +272,7 @@ export async function fetchPoolMeta(address, chain) {
     swapFee: +p.dynamicData?.swapFee || 0,
     yieldApr,
     incentiveApr,
-    tokens: tokens.map((t) => ({
-      address: t.address.toLowerCase(),
-      symbol: t.symbol,
-      weight: t.weight == null ? null : +t.weight,
-    })),
+    tokens: tokens.map(mapToken),
   }
 }
 
@@ -309,6 +331,12 @@ function buildRows(tokens, snaps, priceMaps) {
   const symbols = tokens.map((t) => t.symbol)
   const perToken = tokens.map((t) => priceMaps.get(t.address) || new Map())
   if (perToken.some((m) => m.size === 0)) return { rows: [], missingPrices: true }
+  // Underlying price series for boosted tokens; falls back to the token's own
+  // series when it is not wrapped (then the two HODL bases coincide).
+  const perUnder = tokens.map((t, i) => {
+    const m = t.underlying ? priceMaps.get(t.underlying.address) : null
+    return m && m.size ? m : perToken[i]
+  })
 
   const byDay = new Map()
   let firstMs = Infinity
@@ -335,6 +363,12 @@ function buildRows(tokens, snaps, priceMaps) {
     if (state.amounts.length !== tokens.length) continue
     const prices = perToken.map((m) => m.get(day))
     if (prices.some((p) => p == null || !(p > 0))) continue
+    // Missing an underlying price on a given day just means that day cannot
+    // support the underlying basis; fall back so the wrapped basis still works.
+    const underPrices = perUnder.map((m, i) => {
+      const v = m.get(day)
+      return v > 0 ? v : prices[i]
+    })
     const tvl = state.amounts.reduce((a, amt, i) => a + amt * prices[i], 0)
     if (!(tvl > 0)) continue
     rows.push({
@@ -342,6 +376,7 @@ function buildRows(tokens, snaps, priceMaps) {
       symbols,
       amounts: state.amounts,
       prices,
+      underPrices,
       bpt: state.bpt,
       tvl,
       apiTvl: state.apiTvl,
@@ -365,7 +400,7 @@ export async function fetchPoolSeries(address, chain, { force = false, meta } = 
   const poolMeta = meta || (await fetchPoolMeta(addr, chain))
   const [snaps, priceMaps] = await Promise.all([
     fetchSnapshots(addr, chain),
-    fetchChainPrices(chain, poolMeta.tokens.map((t) => t.address), 'ONE_YEAR'),
+    fetchChainPrices(chain, tokenPriceAddresses(poolMeta.tokens), 'ONE_YEAR'),
   ])
   const { rows, missingPrices } = buildRows(poolMeta.tokens, snaps, priceMaps)
   if (missingPrices) {
@@ -391,7 +426,7 @@ export async function scanPools(
   const byChain = new Map()
   for (const p of pools) {
     const set = byChain.get(p.chain) || new Set()
-    for (const t of p.tokens) set.add(t.address)
+    for (const a of tokenPriceAddresses(p.tokens)) set.add(a)
     byChain.set(p.chain, set)
   }
   const pricePromises = new Map()

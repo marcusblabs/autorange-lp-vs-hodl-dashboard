@@ -11,14 +11,17 @@ function path(vals, yOf, n) {
   return d
 }
 
-export default function ValueChart({ pts }) {
+export default function ValueChart({ pts, showUnderlying = false }) {
   const H = 300
   const n = pts.length
   const { ref, idx, onMove, onLeave } = useHoverIndex(n)
   const lp = pts.map((p) => p.lp)
   const hd = pts.map((p) => p.hodl)
-  const lo = Math.min(...lp, ...hd)
-  const hi = Math.max(...lp, ...hd)
+  // Third leg for boosted pools: holding the plain underlying assets, which
+  // earn no yield. Sits below the wrapped leg by exactly the accrued yield.
+  const hu = showUnderlying ? pts.map((p) => p.hodlU) : []
+  const lo = Math.min(...lp, ...hd, ...hu)
+  const hi = Math.max(...lp, ...hd, ...hu)
   const pad = Math.max(0.25, (hi - lo) * 0.08) // small floor so stable/stable pools aren't a flat line
   const yMin = lo - pad
   const yMax = hi + pad
@@ -43,6 +46,7 @@ export default function ValueChart({ pts }) {
     )
   }
   const hodlPath = path(hd, yOf, n)
+  const hodlUPath = showUnderlying ? path(hu, yOf, n) : null
   const lpPath = path(lp, yOf, n)
   const area = hodlPath + 'L' + xAt(n - 1, n) + ' ' + yOf(yMin) + ' L' + xAt(0, n) + ' ' + yOf(yMin) + ' Z'
 
@@ -55,11 +59,18 @@ export default function ValueChart({ pts }) {
         {xt}
         <path d={area} fill="#7f6ae8" opacity="0.08" />
         <path d={hodlPath} fill="none" stroke="#63f2be" strokeWidth="2.1" strokeLinejoin="round" />
+        {hodlUPath && (
+          <path d={hodlUPath} fill="none" stroke="#f2c063" strokeWidth="1.8"
+                strokeDasharray="5 3" strokeLinejoin="round" />
+        )}
         <path d={lpPath} fill="none" stroke="#7f6ae8" strokeWidth="2.1" strokeLinejoin="round" />
         {hov && (
           <g className="cross" pointerEvents="none">
             <line x1={xAt(idx, n)} y1={P.t} x2={xAt(idx, n)} y2={H - P.b} />
             <circle cx={xAt(idx, n)} cy={yOf(hov.hodl)} r="3.6" fill="#63f2be" stroke="var(--panel)" strokeWidth="1.4" />
+            {showUnderlying && (
+              <circle cx={xAt(idx, n)} cy={yOf(hov.hodlU)} r="3.2" fill="#f2c063" stroke="var(--panel)" strokeWidth="1.4" />
+            )}
             <circle cx={xAt(idx, n)} cy={yOf(hov.lp)} r="3.6" fill="#7f6ae8" stroke="var(--panel)" strokeWidth="1.4" />
           </g>
         )}
@@ -69,7 +80,13 @@ export default function ValueChart({ pts }) {
           <div className="tip-d">{fmtDate(hov.day)}</div>
           <div className="tip-r"><span className="dot" style={{ background: 'var(--purple)' }} />LP<b>{hov.lp.toFixed(2)}</b></div>
           <div className="tip-r"><span className="dot" style={{ background: 'var(--green)' }} />HODL<b>{hov.hodl.toFixed(2)}</b></div>
+          {showUnderlying && (
+            <div className="tip-r"><span className="dot" style={{ background: 'var(--amber)' }} />underlying<b>{hov.hodlU.toFixed(2)}</b></div>
+          )}
           <div className="tip-g">LP − HODL {fmtPct(hov.gap)}</div>
+          {showUnderlying && (
+            <div className="tip-g">vs underlying {fmtPct(hov.gapU)}</div>
+          )}
         </div>
       )}
     </div>

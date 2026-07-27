@@ -224,6 +224,23 @@ export default function App() {
 
           <StatCards win={win} />
 
+          {win.boosted && (
+            <div className="note">
+              <b>Boosted pool.</b> Against the wrapped tokens the pool holds, the LP is{' '}
+              <b>{win.gapFinal >= 0 ? '+' : ''}{win.gapFinal.toFixed(2)}%</b> — that comparison
+              cancels the yield out, so it measures the AMM alone. Against the{' '}
+              <b>underlying assets you would actually have deposited</b> (which earn nothing sitting
+              in a wallet) it is{' '}
+              <b style={{ color: win.gapUnderFinal >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {win.gapUnderFinal >= 0 ? '+' : ''}{win.gapUnderFinal.toFixed(2)}%
+              </b>
+              . The{' '}
+              {/* derive from the rounded figures shown above so the arithmetic reads consistently */}
+              {Math.abs(+win.gapUnderFinal.toFixed(2) - +win.gapFinal.toFixed(2)).toFixed(2)}%
+              {' '}difference is the wrapper's accrued yield over this window.
+            </div>
+          )}
+
           <div className="panel">
             <h2>
               {win.label} — position value over time
@@ -238,9 +255,12 @@ export default function App() {
             </p>
             <div className="legend">
               <span><span className="dot" style={{ background: 'var(--purple)' }} /><b>LP (in the pool)</b></span>
-              <span><span className="dot" style={{ background: 'var(--green)' }} /><b>HODL ({win.nTokens}-token basket)</b></span>
+              <span><span className="dot" style={{ background: 'var(--green)' }} /><b>HODL the pool's tokens</b></span>
+              {win.boosted && (
+                <span><span className="dot" style={{ background: 'var(--amber)' }} /><b>HODL the underlying</b></span>
+              )}
             </div>
-            <ValueChart pts={win.pts} />
+            <ValueChart pts={win.pts} showUnderlying={win.boosted} />
           </div>
 
           <div className="panel">

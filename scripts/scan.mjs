@@ -164,6 +164,12 @@ for (const r of results) {
           gap: +c.gapFinal.toFixed(3),
           lp: +c.lpFinal.toFixed(2),
           hodl: +c.hodlFinal.toFixed(2),
+          // vs holding the UNDERLYING assets (plain USDC, not waEthUSDC) —
+          // the alternative an LP actually has. Equal to `gap` when the pool
+          // holds no boosted tokens.
+          gapU: +c.gapUnderFinal.toFixed(3),
+          hodlU: +c.hodlUnderFinal.toFixed(2),
+          boost: +c.boostPct.toFixed(3),
           fees: +c.feePct.toFixed(3),
           drag: +c.dragPct.toFixed(3),
           entry: c.entryDate,
@@ -214,6 +220,8 @@ for (const r of results) {
     incentiveApr: +(pool.incentiveApr || 0).toFixed(5),
     nTokens: pool.tokens.length,
     reviewed: pool.reviewed,
+    boosted: pool.tokens.some((t) => t.underlying),
+    underlyingLabel: pool.tokens.map((t) => t.underlying?.symbol || t.symbol).join(' / '),
     maxWin: s.maxWin,
     live: s.live,
     // Windows are measured back from a pool's LAST TRADING DAY, not from

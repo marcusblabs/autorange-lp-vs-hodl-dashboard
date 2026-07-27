@@ -99,16 +99,28 @@ withdrawals.
 The event-replay reconstruction is kept as an independent cross-check:
 [Dune #7649043](https://dune.com/queries/7649043) (source in [`query/`](query/)).
 
-### Yield vs incentives — an important distinction
+### Two HODL bases — what exactly are you holding instead?
 
-- **Yield-bearing (boosted) tokens** — `IB_YIELD`, e.g. `waEthUSDC`. Both the LP *and* the
-  holder hold the same wrapped token, so the underlying yield lifts **both legs equally and
-  cancels out of LP − HODL**. Boosting can never make LPing beat holding on its own. Shown as
-  a column for context only.
-- **External incentives** — `MERKL` / `STAKING`. These go to liquidity providers *only* and
-  never touch the pool's reserves, so they are **not** in value-per-share. Pools that pay them
-  are tagged `+rewards`; their true LP result is better than the columns show.
+60% of v3 pools (86 of 128) hold yield-bearing ERC4626 wrappers, and the answer genuinely
+depends on which counterfactual you mean. The **VS** filter switches between them:
 
+- **POOL TOKENS** — hold the same `waEthUSDC` the pool holds. The Aave yield lifts *both* legs,
+  so it cancels: this isolates what the AMM itself did (fees minus divergence).
+- **UNDERLYING** — hold the plain `USDC` you actually deposited. Nobody's real alternative is
+  holding an aToken, and idle USDC earns nothing, so here the boost counts **for** the LP.
+
+This is not cosmetic. Over 90 days, **16 of 79** live pools flip from "LP lost" to "LP won" purely
+by changing basis — including a $7M pool going −0.12% → +0.52%. The difference between the two
+figures is exactly the wrapper's accrued yield over the window, and the pool detail page draws
+both HODL legs so you can see it.
+
+Conversion uses the **ratio of the two USD price series**, not the API's `priceRate` field: rate
+providers can fold in more than the wrapper rate. `waBasEURC` reports `priceRate` 1.1753 while its
+true wrapper rate is 1.0307 — the gap is the EUR/USD rate baked into the provider.
+
+- **External incentives** (`MERKL` / `STAKING`) are different again: LP-only rewards that never
+  touch the pool's reserves, so they are in neither basis. Pools paying them are tagged
+  `+rewards` and their true LP result is better than shown.
 ### Caveats
 
 - External gauge/Merkl incentives are **not** added; where they exist they would lift the LP leg.

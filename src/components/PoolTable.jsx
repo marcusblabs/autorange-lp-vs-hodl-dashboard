@@ -34,6 +34,15 @@ const WIN_COLS = [30, 90, 180, 'full']
 const winKey = (w) => (w === 'full' ? 'wfull' : 'w' + w)
 const winLabel = (w) => (w === 'full' ? 'FULL' : w + 'D')
 
+// What the LP is measured against. For a boosted pool these differ, and can
+// disagree on the sign — see the footnote in the table.
+const BASES = [
+  { v: 'WRAPPED', label: 'POOL TOKENS' },
+  { v: 'UNDERLYING', label: 'UNDERLYING' },
+]
+const gapOf = (c, basis) => (c ? (basis === 'UNDERLYING' ? c.gapU ?? c.gap : c.gap) : null)
+const hodlOf = (c, basis) => (basis === 'UNDERLYING' ? c.hodlU ?? c.hodl : c.hodl)
+
 // Colour ramp for the LP−HODL cells: neutral near zero, deepening toward the
 // extremes so the eye lands on the pools that actually diverged.
 function gapStyle(v) {
@@ -69,16 +78,16 @@ const COLS = [
 const bestWindow = (r) => r.win[180] || r.win[90] || r.win[30] || r.win.full || null
 const bestWindowDays = (r) => bestWindow(r)?.days ?? null
 
-function sortValue(r, key) {
+function sortValue(r, key, basis) {
   switch (key) {
     case 'label': return r.label.toLowerCase()
     case 'chain': return chainShort(r.chain).toLowerCase()
     case 'type': return (TYPE_LABEL[r.type] || r.type).toLowerCase()
     case 'tvl': return r.tvl
-    case 'w30': return r.win[30]?.gap
-    case 'w90': return r.win[90]?.gap
-    case 'w180': return r.win[180]?.gap
-    case 'wfull': return r.win.full?.gap
+    case 'w30': return gapOf(r.win[30], basis)
+    case 'w90': return gapOf(r.win[90], basis)
+    case 'w180': return gapOf(r.win[180], basis)
+    case 'wfull': return gapOf(r.win.full, basis)
     case 'fees': return bestWindow(r)?.fees
     case 'drag': return bestWindow(r)?.drag
     case 'yield': return r.yieldApr
@@ -89,7 +98,8 @@ function sortValue(r, key) {
 function toCsv(rows) {
   const head = [
     'pool', 'address', 'chain', 'type', 'tvl_usd',
-    'lp_minus_hodl_30d', 'lp_minus_hodl_90d', 'lp_minus_hodl_180d', 'lp_minus_hodl_full',
+    'vs_pooltokens_30d', 'vs_pooltokens_90d', 'vs_pooltokens_180d', 'vs_pooltokens_full',
+    'vs_underlying_30d', 'vs_underlying_90d', 'vs_underlying_180d', 'vs_underlying_full',
     'fees_pct_tvl', 'il_drag_pct', 'underlying_yield_apr', 'incentive_apr',
     'live', 'last_day', 'days_of_history', 'flags',
   ]
@@ -102,6 +112,7 @@ function toCsv(rows) {
     return [
       r.label, r.address, r.chain, TYPE_LABEL[r.type] || r.type, r.tvl,
       r.win[30]?.gap ?? '', r.win[90]?.gap ?? '', r.win[180]?.gap ?? '', r.win.full?.gap ?? '',
+      r.win[30]?.gapU ?? '', r.win[90]?.gapU ?? '', r.win[180]?.gapU ?? '', r.win.full?.gapU ?? '',
       bw?.fees ?? '', bw?.drag ?? '', r.yieldApr ?? '', r.incentiveApr ?? '',
       r.live, r.lastDay ?? '', r.maxWin ?? '', (r.flags || []).join(' | '),
     ].map(esc).join(',')
@@ -116,6 +127,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
   const [chain, setChain] = useState('ALL')
   const [type, setType] = useState('ALL')
   const [show, setShow] = useState('LIVE')
+  const [basis, setBasis] = useState('WRAPPED')
 
   // Only offer values that actually exist, with counts — AutoRange pools are
   // small and new, so a TVL sort buries them; this is how you find them.
@@ -157,8 +169,8 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
     const out = [...filtered]
     const { key, dir } = sort
     out.sort((a, b) => {
-      const va = sortValue(a, key)
-      const vb = sortValue(b, key)
+      const va = sortValue(a, key, basis)
+      const vb = sortValue(b, key, basis)
       // rows missing a value always sink to the bottom, whichever direction
       if (va == null && vb == null) return 0
       if (va == null) return 1
@@ -167,7 +179,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
       return dir === 'asc' ? va - vb : vb - va
     })
     return out
-  }, [filtered, sort])
+  }, [filtered, sort, basis])
 
   const click = (key) =>
     setSort((s) =>
@@ -177,7 +189,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
     )
 
   const scored = sorted.filter((r) => bestWindow(r))
-  const beat = scored.filter((r) => bestWindow(r).gap > 0).length
+  const beat = scored.filter((r) => gapOf(bestWindow(r), basis) > 0).length
   const totalTvl = sorted.reduce((a, r) => a + r.tvl, 0)
 
   function downloadCsv() {
@@ -196,7 +208,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         <div><span className="sl">POOLS</span><span className="sv">{sorted.length}</span></div>
         <div><span className="sl">TOTAL TVL</span><span className="sv">{fmtUsd(totalTvl)}</span></div>
         <div>
-          <span className="sl">LP BEAT HOLDING</span>
+          <span className="sl">LP BEAT {basis === 'UNDERLYING' ? 'UNDERLYING' : 'POOL TOKENS'}</span>
           <span className="sv" style={{ color: 'var(--green)' }}>
             {beat}<span className="sv-sub">/{scored.length}</span>
           </span>
@@ -204,7 +216,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         <div>
           <span className="sl">MEDIAN 90D</span>
           <span className="sv">{(() => {
-            const g = sorted.map((r) => r.win[90]?.gap).filter((v) => v != null).sort((a, b) => a - b)
+            const g = sorted.map((r) => gapOf(r.win[90], basis)).filter((v) => v != null).sort((a, b) => a - b)
             if (!g.length) return '—'
             const m = g[Math.floor(g.length / 2)]
             return <span style={{ color: m >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtPct(m)}</span>
@@ -258,11 +270,20 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
             ))}
           </select>
         </span>
+        <span className="fgroup">
+          <span className="flabel">VS</span>
+          <select value={basis} onChange={(e) => setBasis(e.target.value)}
+                  title="What the LP is compared against. POOL TOKENS = hold the same wrapped tokens the pool holds (their yield lifts both sides, so it cancels — this isolates what the AMM did). UNDERLYING = hold the plain assets you actually deposited (no yield accrues to a holder, so the boost counts for the LP).">
+            {BASES.map((b) => (
+              <option key={b.v} value={b.v}>{b.label}</option>
+            ))}
+          </select>
+        </span>
         <button className="fbtn" onClick={downloadCsv} disabled={!sorted.length}>[ CSV ]</button>
-        {(query || chain !== 'ALL' || type !== 'ALL' || minTvl || show !== 'LIVE') && (
+        {(query || chain !== 'ALL' || type !== 'ALL' || minTvl || show !== 'LIVE' || basis !== 'WRAPPED') && (
           <button
             className="fbtn"
-            onClick={() => { setQuery(''); setChain('ALL'); setType('ALL'); setMinTvl(0); setShow('LIVE') }}
+            onClick={() => { setQuery(''); setChain('ALL'); setType('ALL'); setMinTvl(0); setShow('LIVE'); setBasis('WRAPPED') }}
           >
             [ RESET ]
           </button>
@@ -294,6 +315,11 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
                   <td className="pool">
                     <span className="plabel">{r.label}</span>
                     {r.nTokens > 2 && <span className="mini">{r.nTokens}t</span>}
+                    {r.boosted && (
+                      <span className="mini boost" title={`Boosted pool — holds yield-bearing wrappers. Underlying assets: ${r.underlyingLabel}. Use the VS filter to switch which basket the LP is compared against.`}>
+                        boosted
+                      </span>
+                    )}
                     {r.flags?.length > 0 && (
                       <span className="mini flag" title={`Data sanity check failed — ${r.flags.join('; ')}. Treat these numbers with suspicion.`}>
                         ⚑ suspect
@@ -318,12 +344,14 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
                   <td className="r num">{fmtUsd(r.tvl)}</td>
                   {WIN_COLS.map((w) => {
                     const c = r.win[w]
+                    const g = gapOf(c, basis)
                     return (
-                      <td key={w} className="r num" style={gapStyle(c?.gap)}
+                      <td key={w} className="r num" style={gapStyle(g)}
                           title={c
-                            ? `$100 in on ${c.entry} (${c.days}d) → LP $${c.lp.toFixed(2)} vs HODL $${c.hodl.toFixed(2)}`
+                            ? `$100 in on ${c.entry} (${c.days}d) → LP $${c.lp.toFixed(2)} vs HODL $${hodlOf(c, basis).toFixed(2)}`
+                              + (c.boost ? ` · boost over this window ${(c.boost >= 0 ? '+' : '') + c.boost.toFixed(2)}%` : '')
                             : `Only ${r.maxWin}d of history`}>
-                        {c ? fmtPct(c.gap, 2) : <span className="dim">—</span>}
+                        {g != null ? fmtPct(g, 2) : <span className="dim">—</span>}
                       </td>
                     )
                   })}
@@ -350,8 +378,12 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         deposited. Negative means holding won. <b>Fees</b> is what the pool earned in swap fees over
         the window (% of average TVL) and <b>IL drag</b> is the gap minus those fees — roughly the
         impermanent-loss / LVR cost. <b>Yield</b> is the underlying yield-bearing APR: an LP and a
-        holder both earn it, so it cancels out of the comparison and can never make LPing beat
-        holding on its own. Pools tagged <span className="mini warn">+rewards</span> pay external
+        holder both earn it — so on the <b>POOL TOKENS</b> basis it cancels out and can never make
+        LPing win on its own. Switch <b>VS</b> to <b>UNDERLYING</b> to compare against the plain
+        assets you actually deposited (USDC rather than waEthUSDC): a holder of those earns no
+        yield, so the boost then counts in the LP's favour. For boosted pools the two bases can
+        disagree on the sign, and the difference between them is exactly the yield the wrapper
+        accrued over the window. Pools tagged <span className="mini warn">+rewards</span> pay external
         incentives (Merkl/staking) that go to LPs only and are <b>not</b> counted here — their true
         LP result is better than the columns show. Click any row for the full chart.
         {' '}Pools Balancer itself blacklists are excluded

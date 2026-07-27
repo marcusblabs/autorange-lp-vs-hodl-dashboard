@@ -51,6 +51,9 @@ export function normalizeSeries(rows) {
       symbols: r.symbols,
       amounts: r.amounts.map(Number),
       prices: r.prices.map(Number),
+      // Price of each token's UNDERLYING asset (USDC behind waEthUSDC). Equal
+      // to `prices` for tokens that are not boosted.
+      underPrices: (r.underPrices || r.prices).map(Number),
       bpt: +r.bpt,
       tvl: +r.tvl,
       fees: +r.fees || 0,
@@ -127,17 +130,38 @@ export function computeWindow(series, windowDays) {
 
   const t0 = slice[0]
   const comp = t0.amounts.map((a) => a / t0.bpt) // entry basket, per share
-  const vps0 = t0.tvl / t0.bpt // LP and HODL coincide at entry
+  const vps0 = t0.tvl / t0.bpt // LP and both HODL legs coincide at entry
   const hodlVps = (p) => comp.reduce((acc, c, i) => acc + c * p.prices[i], 0)
+
+  // Two HODL counterfactuals, because a boosted pool has two honest answers:
+  //
+  //   WRAPPED    hold the same waEthUSDC the pool holds. The Aave yield lifts
+  //              this leg AND the LP leg, so it cancels — this isolates what
+  //              the AMM itself did (fees minus divergence).
+  //   UNDERLYING hold the plain USDC you actually brought. No yield accrues to
+  //              a holder, so the boost now counts in the LP's favour. This is
+  //              the real decision: pool it, or leave it in your wallet?
+  //
+  // Underlying value is carried as entry USD value grown by the UNDERLYING's
+  // price return, which needs no wrapper-rate field:
+  //   hodlU(t) = Σ [compᵢ·pᵢ(t0)] · uᵢ(t)/uᵢ(t0)
+  // and equals vps0 at t0, so all three series start at 100.
+  const entryValue = comp.map((c, i) => c * t0.prices[i])
+  const u0 = t0.underPrices
+  const hodlUnderVps = (p) =>
+    entryValue.reduce((acc, v, i) => acc + (u0[i] > 0 ? v * (p.underPrices[i] / u0[i]) : v), 0)
 
   const pts = slice.map((p) => {
     const lp = p.tvl / p.bpt
     const hodl = hodlVps(p)
+    const hodlU = hodlUnderVps(p)
     return {
       day: p.day,
       lp: (100 * lp) / vps0,
       hodl: (100 * hodl) / vps0,
+      hodlU: (100 * hodlU) / vps0,
       gap: (100 * (lp - hodl)) / vps0,
+      gapU: (100 * (lp - hodlU)) / vps0,
       tvl: p.tvl,
     }
   })
@@ -161,6 +185,12 @@ export function computeWindow(series, windowDays) {
     lpFinal: lastPt.lp,
     hodlFinal: lastPt.hodl,
     gapFinal: lastPt.gap,
+    hodlUnderFinal: lastPt.hodlU,
+    gapUnderFinal: lastPt.gapU,
+    // How much the wrapped basket earned purely from its underlying yield over
+    // the window — exactly the difference between the two bases.
+    boostPct: lastPt.gapU - lastPt.gap,
+    boosted: t0.underPrices.some((u, i) => Math.abs(u - t0.prices[i]) / (t0.prices[i] || 1) > 1e-9),
     feePct,
     // gap minus fees ≈ the impermanent-loss / LVR component
     dragPct: lastPt.gap - feePct,

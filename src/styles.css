@@ -243,3 +243,4 @@ table.pooltable { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .pooltable th .arrow { opacity: 0.55; }
 .pooltable th.sorted .arrow { opacity: 1; color: var(--purple-soft); }
+.mini.boost { background: rgba(127, 106, 232, 0.16); border-color: rgba(127, 106, 232, 0.5); color: var(--purple-soft); }
