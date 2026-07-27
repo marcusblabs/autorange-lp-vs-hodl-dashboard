@@ -28,6 +28,11 @@ export const CHAIN_INFO = {
   HYPEREVM: { name: 'HyperEVM', slug: 'hyperevm', explorer: 'https://hyperevmscan.io/address/' },
   MONAD: { name: 'Monad', slug: 'monad', explorer: 'https://monadexplorer.com/address/' },
   PLASMA: { name: 'Plasma', slug: 'plasma', explorer: 'https://plasmascan.to/address/' },
+  // v2 reaches several chains v3 never shipped on.
+  POLYGON: { name: 'Polygon', slug: 'polygon', explorer: 'https://polygonscan.com/address/' },
+  FANTOM: { name: 'Fantom', slug: 'fantom', explorer: 'https://ftmscan.com/address/' },
+  ZKEVM: { name: 'zkEVM', slug: 'zkevm', explorer: 'https://zkevm.polygonscan.com/address/' },
+  XLAYER: { name: 'X Layer', slug: 'xlayer', explorer: 'https://www.oklink.com/xlayer/address/' },
 }
 
 // Chains deliberately left out of the scan. SEPOLIA is a testnet; the rest are
@@ -43,8 +48,13 @@ export const CHAIN_SHORT = {
   SONIC: 'SONIC', POLYGON: 'POLY', ZKEVM: 'ZKEVM', FRAXTAL: 'FRAX', MODE: 'MODE',
 }
 export const chainShort = (c) => CHAIN_SHORT[c] || String(c).slice(0, 4)
-export const BALANCER_POOL_URL = (chain, a) =>
-  `https://balancer.fi/pools/${CHAIN_INFO[chain]?.slug || String(chain).toLowerCase()}/v3/${a}`
+// balancer.fi routes by protocol: v3 by address, v2 by the full 32-byte pool
+// id, CoW AMM (v1) under /cow/. Linking a v2 pool as /v3/<address> 404s.
+export const BALANCER_POOL_URL = (chain, idOrAddress, protocolVersion = 3) => {
+  const slug = CHAIN_INFO[chain]?.slug || String(chain).toLowerCase()
+  const seg = protocolVersion === 1 ? 'cow' : protocolVersion === 2 ? 'v2' : 'v3'
+  return `https://balancer.fi/pools/${slug}/${seg}/${idOrAddress}`
+}
 export const EXPLORER_ADDR = (chain, a) =>
   CHAIN_INFO[chain]?.explorer ? CHAIN_INFO[chain].explorer + a : BALANCER_POOL_URL(chain, a)
 

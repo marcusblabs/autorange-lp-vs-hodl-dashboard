@@ -37,10 +37,19 @@ const winLabel = (w) => (w === 'full' ? 'FULL' : w + 'D')
 // What the LP is measured against. For a boosted pool these differ, and can
 // disagree on the sign — see the footnote in the table.
 const BASES = [
-  { v: 'WRAPPED', label: 'POOL TOKENS' },
-  { v: 'UNDERLYING', label: 'UNDERLYING' },
+  {
+    v: 'WRAPPED',
+    label: 'Vault token',
+    blurb: 'hold the same waEthUSDC the pool holds — its yield lifts both sides, so this measures the AMM alone',
+  },
+  {
+    v: 'UNDERLYING',
+    label: 'Underlying',
+    blurb: 'hold the plain USDC you actually deposited — idle in a wallet it earns nothing, so the boost counts for the LP',
+  },
 ]
 const gapOf = (c, basis) => (c ? (basis === 'UNDERLYING' ? c.gapU ?? c.gap : c.gap) : null)
+const aprOf = (c, basis) => (c ? (basis === 'UNDERLYING' ? c.aprU ?? c.apr : c.apr) : null)
 const hodlOf = (c, basis) => (basis === 'UNDERLYING' ? c.hodlU ?? c.hodl : c.hodl)
 
 // Colour ramp for the LP−HODL cells: neutral near zero, deepening toward the
@@ -69,6 +78,7 @@ const COLS = [
         ? 'LP − HODL over the pool’s whole life. Always populated, so young pools still say something.'
         : `LP − HODL over the last ${w} days`,
   })),
+  { key: 'apr', label: 'APR', align: 'right', title: 'Annualised out/under-performance vs holding: (LP/HODL)^(365/days) − 1, from the longest window with at least 14 days. A realised rate, not a forecast.' },
   { key: 'fees', label: 'FEES', align: 'right', title: 'Swap fees earned over the longest available window, as % of average TVL' },
   { key: 'drag', label: 'IL DRAG', align: 'right', title: 'Gap minus fees ≈ the impermanent-loss / LVR component' },
   { key: 'yield', label: 'YIELD', align: 'right', title: 'Underlying yield-bearing APR. Both the LP and a holder earn this, so it cancels out of LP − HODL.' },
@@ -88,6 +98,7 @@ function sortValue(r, key, basis) {
     case 'w90': return gapOf(r.win[90], basis)
     case 'w180': return gapOf(r.win[180], basis)
     case 'wfull': return gapOf(r.win.full, basis)
+    case 'apr': return aprOf(bestWindow(r), basis)
     case 'fees': return bestWindow(r)?.fees
     case 'drag': return bestWindow(r)?.drag
     case 'yield': return r.yieldApr
@@ -163,15 +174,17 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
       if (show === 'FLAGGED') return r.live || flagged
       return true
     }
-    const matches = rows.filter((r) => matchesQuery(r, q))
-    const out = matches.filter(
+    // Count only what the chain / type / min-TVL filters remove. Rows the SHOW
+    // dropdown excludes are not "hidden" — that control states its own effect,
+    // and counting them made the hint fire permanently with no filter set.
+    const eligible = rows.filter((r) => matchesQuery(r, q) && allowed(r))
+    const out = eligible.filter(
       (r) =>
-        allowed(r) &&
         (chain === 'ALL' || r.chain === chain) &&
         (type === 'ALL' || r.type === type) &&
         r.tvl >= minTvl
     )
-    return { filtered: out, hiddenByFilters: matches.length - out.length }
+    return { filtered: out, hiddenByFilters: eligible.length - out.length }
   }, [rows, query, minTvl, chain, type, show])
 
   const sorted = useMemo(() => {
@@ -213,11 +226,29 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
 
   return (
     <>
+      <div className="basisbar">
+        <div className="basis-q">
+          Compare the LP against <b>what</b>?
+        </div>
+        <div className="basis-opts">
+          {BASES.map((b) => (
+            <button
+              key={b.v}
+              className={'basis-opt' + (basis === b.v ? ' on' : '')}
+              onClick={() => setBasis(b.v)}
+            >
+              <span className="basis-name">Holding the {b.label.toLowerCase()}</span>
+              <span className="basis-blurb">{b.blurb}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="statstrip">
         <div><span className="sl">POOLS</span><span className="sv">{sorted.length}</span></div>
         <div><span className="sl">TOTAL TVL</span><span className="sv">{fmtUsd(totalTvl)}</span></div>
         <div>
-          <span className="sl">LP BEAT {basis === 'UNDERLYING' ? 'UNDERLYING' : 'POOL TOKENS'}</span>
+          <span className="sl">LP BEAT {basis === 'UNDERLYING' ? 'UNDERLYING' : 'VAULT TOKEN'}</span>
           <span className="sv" style={{ color: 'var(--green)' }}>
             {beat}<span className="sv-sub">/{scored.length}</span>
           </span>
@@ -279,20 +310,11 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
             ))}
           </select>
         </span>
-        <span className="fgroup">
-          <span className="flabel">VS</span>
-          <select value={basis} onChange={(e) => setBasis(e.target.value)}
-                  title="What the LP is compared against. POOL TOKENS = hold the same wrapped tokens the pool holds (their yield lifts both sides, so it cancels — this isolates what the AMM did). UNDERLYING = hold the plain assets you actually deposited (no yield accrues to a holder, so the boost counts for the LP).">
-            {BASES.map((b) => (
-              <option key={b.v} value={b.v}>{b.label}</option>
-            ))}
-          </select>
-        </span>
         <button className="fbtn" onClick={downloadCsv} disabled={!sorted.length}>[ CSV ]</button>
-        {(query || chain !== 'ALL' || type !== 'ALL' || minTvl || show !== 'LIVE' || basis !== 'WRAPPED') && (
+        {(query || chain !== 'ALL' || type !== 'ALL' || minTvl || show !== 'LIVE') && (
           <button
             className="fbtn"
-            onClick={() => { setQuery(''); setChain('ALL'); setType('ALL'); setMinTvl(0); setShow('LIVE'); setBasis('WRAPPED') }}
+            onClick={() => { setQuery(''); setChain('ALL'); setType('ALL'); setMinTvl(0); setShow('LIVE') }}
           >
             [ RESET ]
           </button>
@@ -374,6 +396,10 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
                       </td>
                     )
                   })}
+                  <td className="r num" style={gapStyle(aprOf(bw, basis))}
+                      title={bw ? `annualised from the ${bestWindowDays(r)}-day window` : ''}>
+                    {aprOf(bw, basis) != null ? fmtPct(aprOf(bw, basis), 1) : <span className="dim" title="needs at least 14 days of history">—</span>}
+                  </td>
                   <td className="r num dimtext" title={bw ? `swap fees over ${bestWindowDays(r)} days, as % of average TVL` : ''}>
                     {bw ? bw.fees.toFixed(2) + '%' : <span className="dim">—</span>}
                   </td>
@@ -405,7 +431,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         deposited. Negative means holding won. <b>Fees</b> is what the pool earned in swap fees over
         the window (% of average TVL) and <b>IL drag</b> is the gap minus those fees — roughly the
         impermanent-loss / LVR cost. <b>Yield</b> is the underlying yield-bearing APR: an LP and a
-        holder both earn it — so on the <b>POOL TOKENS</b> basis it cancels out and can never make
+        holder both earn it — so on the <b>vault token</b> basis it cancels out and can never make
         LPing win on its own. Switch <b>VS</b> to <b>UNDERLYING</b> to compare against the plain
         assets you actually deposited (USDC rather than waEthUSDC): a holder of those earns no
         yield, so the boost then counts in the LP's favour. For boosted pools the two bases can

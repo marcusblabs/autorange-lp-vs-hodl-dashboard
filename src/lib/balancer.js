@@ -42,6 +42,8 @@ const SNAPSHOT_CONCURRENCY = 4
 // public/scan.json rather than fetched live, and every request here retries
 // politely on 429 so a single-pool drill-down still succeeds.
 const MAX_RETRIES = 4
+// Snapshots older than this are corrupt sentinels, not history.
+const MIN_SNAPSHOT_MS = Date.UTC(2020, 0, 1)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function gql(query, { signal, retries = MAX_RETRIES } = {}) {
@@ -142,6 +144,7 @@ const chunk = (arr, n) => {
  */
 function mapToken(t) {
   return {
+    idx: t.index,
     address: t.address.toLowerCase(),
     symbol: t.symbol,
     weight: t.weight == null ? null : +t.weight,
@@ -150,6 +153,21 @@ function mapToken(t) {
         ? { address: t.underlyingToken.address.toLowerCase(), symbol: t.underlyingToken.symbol }
         : null,
   }
+}
+
+/**
+ * Tokens an LP actually owns a share of.
+ *
+ * Composable-stable (v2) pools pre-mint a huge slug of their OWN BPT and hold
+ * it as a pool token — `amounts` carries ~2.6e15 of it. That is phantom, not
+ * liquidity: the API's own TVL excludes it, and `totalShares` is already the
+ * circulating supply (so it must NOT be reduced by the held amount — doing so
+ * goes negative). Dropping the self-token from the basket makes reserves
+ * reconcile and leaves value-per-share correct.
+ */
+function realTokens(tokens, poolAddress) {
+  const self = String(poolAddress || '').toLowerCase()
+  return tokens.map(mapToken).filter((t) => t.address !== self)
 }
 
 function summarizeAprs(items) {
@@ -189,20 +207,20 @@ export async function fetchAllPools({ force = false } = {}) {
   const [data, reviewedData, blacklisted] = await Promise.all([
     gql(`{
       poolGetPools(first: 1000, orderBy: totalLiquidity, orderDirection: desc,
-                   where: {protocolVersionIn: [3], minTvl: ${SCAN_MIN_TVL_USD},
+                   where: {protocolVersionIn: [1, 2, 3], minTvl: ${SCAN_MIN_TVL_USD},
                            chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
                            tagNotIn: ["BLACK_LISTED"]}) {
-        address chain type version name
+        id address chain type version protocolVersion name
         dynamicData { totalLiquidity swapFee aprItems { title apr type } }
         poolTokens { index address symbol weight isErc4626 underlyingToken { address symbol } }
       }
     }`),
     gql(`{
-      poolGetPools(first: 1000, where: {protocolVersionIn: [3], minTvl: ${SCAN_MIN_TVL_USD}, chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
+      poolGetPools(first: 1000, where: {protocolVersionIn: [1, 2, 3], minTvl: ${SCAN_MIN_TVL_USD}, chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
                                         reviewedOnly: true}) { address }
     }`),
     gql(`{
-      poolGetPools(first: 1000, where: {protocolVersionIn: [3], minTvl: ${SCAN_MIN_TVL_USD}, chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
+      poolGetPools(first: 1000, where: {protocolVersionIn: [1, 2, 3], minTvl: ${SCAN_MIN_TVL_USD}, chainNotIn: [${EXCLUDED_CHAINS.join(', ')}],
                                         tagIn: ["BLACK_LISTED"]}) { address }
     }`),
   ])
@@ -215,17 +233,22 @@ export async function fetchAllPools({ force = false } = {}) {
     const tokens = [...p.poolTokens].sort((a, b) => a.index - b.index)
     const { yieldApr, incentiveApr } = summarizeAprs(p.dynamicData?.aprItems)
     return {
+      // v2 pool ids are 32 bytes (address + nonce) and poolGetPool /
+      // poolGetSnapshots key on the id, NOT the address — querying a v2 pool by
+      // address returns zero snapshots silently rather than erroring.
+      id: p.id,
       address: p.address.toLowerCase(),
       chain: p.chain,
       type: p.type,
       version: p.version,
+      protocolVersion: p.protocolVersion,
       name: p.name,
       label: tokens.map((t) => t.symbol).join(' / '),
       tvl: +p.dynamicData?.totalLiquidity || 0,
       swapFee: +p.dynamicData?.swapFee || 0,
       yieldApr,
       incentiveApr,
-      tokens: tokens.map(mapToken),
+      tokens: realTokens(tokens, p.address),
       // Balancer looked at the contract. It does NOT imply the price feed is
       // sane — several reviewed pools carry 100x+ oracle drift.
       reviewed: reviewed.has(p.address.toLowerCase()),
@@ -236,24 +259,47 @@ export async function fetchAllPools({ force = false } = {}) {
   return out
 }
 
-/** Find which chain a pool address lives on (any version, any chain). */
-export async function resolvePool(address) {
-  const addr = address.toLowerCase()
-  const data = await gql(`{
-    poolGetPools(where: {idIn: ["${addr}"]}) { address chain type version name }
+/**
+ * Locate a pool from whatever the user pasted.
+ *
+ * v3 pool ids ARE the address, but a v2 id is 32 bytes (address + nonce) and
+ * `idIn` matches on the id — so a 42-char v2 address finds nothing. There is no
+ * address filter, so fall back to listing pools and matching on the id prefix.
+ */
+export async function resolvePool(input) {
+  const key = String(input).toLowerCase()
+  const direct = await gql(`{
+    poolGetPools(where: {idIn: ["${key}"]}) { id address chain type version name }
   }`)
-  const hit = (data.poolGetPools || []).find((p) => p.address.toLowerCase() === addr)
+  let hit = (direct.poolGetPools || []).find(
+    (p) => p.id.toLowerCase() === key || p.address.toLowerCase() === key
+  )
+  if (!hit) {
+    const all = await gql(`{
+      poolGetPools(first: 1000, where: {protocolVersionIn: [1, 2, 3]}) { id address chain type version name }
+    }`)
+    hit = (all.poolGetPools || []).find(
+      (p) => p.address.toLowerCase() === key || p.id.toLowerCase().startsWith(key)
+    )
+  }
   return hit
-    ? { chain: hit.chain, type: hit.type, version: hit.version, name: hit.name }
+    ? {
+        id: hit.id,
+        address: hit.address.toLowerCase(),
+        chain: hit.chain,
+        type: hit.type,
+        version: hit.version,
+        name: hit.name,
+      }
     : null
 }
 
 /** Pool metadata + ordered tokens for a single pool. */
-export async function fetchPoolMeta(address, chain) {
-  const addr = address.toLowerCase()
+export async function fetchPoolMeta(poolId, chain) {
+  const addr = poolId.toLowerCase()
   const data = await gql(`{
     poolGetPool(id: "${addr}", chain: ${chain}) {
-      type name
+      id address type name protocolVersion
       dynamicData { totalLiquidity swapFee aprItems { title apr type } }
       poolTokens { index address symbol weight isErc4626 underlyingToken { address symbol } }
     }
@@ -263,7 +309,9 @@ export async function fetchPoolMeta(address, chain) {
   const tokens = [...p.poolTokens].sort((a, b) => a.index - b.index)
   const { yieldApr, incentiveApr } = summarizeAprs(p.dynamicData?.aprItems)
   return {
-    address: addr,
+    id: p.id || addr,
+    address: (p.address || addr).toLowerCase(),
+    protocolVersion: p.protocolVersion,
     chain,
     type: p.type,
     name: p.name,
@@ -272,7 +320,7 @@ export async function fetchPoolMeta(address, chain) {
     swapFee: +p.dynamicData?.swapFee || 0,
     yieldApr,
     incentiveApr,
-    tokens: tokens.map(mapToken),
+    tokens: realTokens(tokens, p.address ?? addr),
   }
 }
 
@@ -310,9 +358,9 @@ async function fetchChainPrices(chain, addresses, range, { signal, concurrency =
   return maps
 }
 
-async function fetchSnapshots(address, chain, { signal } = {}) {
+async function fetchSnapshots(poolId, chain, { signal } = {}) {
   const data = await gql(
-    `{ poolGetSnapshots(id: "${address.toLowerCase()}", chain: ${chain}, range: ALL_TIME) {
+    `{ poolGetSnapshots(id: "${poolId.toLowerCase()}", chain: ${chain}, range: ALL_TIME) {
          timestamp totalShares amounts totalLiquidity fees24h } }`,
     { signal }
   )
@@ -343,6 +391,9 @@ function buildRows(tokens, snaps, priceMaps) {
   let lastMs = -Infinity
   for (const s of snaps) {
     const ms = +s.timestamp * 1000
+    // Some v2 snapshots carry an epoch-era timestamp (1970). Walking the
+    // calendar from there would burn ~20k empty iterations per pool.
+    if (ms < MIN_SNAPSHOT_MS) continue
     byDay.set(toDay(s.timestamp), {
       amounts: (s.amounts || []).map(Number),
       bpt: +s.totalShares,
@@ -360,7 +411,10 @@ function buildRows(tokens, snaps, priceMaps) {
     const day = new Date(ms).toISOString().slice(0, 10)
     state = byDay.get(day) || state
     if (!state || !(state.bpt > 0)) continue
-    if (state.amounts.length !== tokens.length) continue
+    // tokens[i].idx points at the original slot, so filtering the pool's own
+    // pre-minted BPT out of the basket does not shift the amounts mapping.
+    const amounts = tokens.map((t) => state.amounts[t.idx])
+    if (amounts.some((a) => a == null || !isFinite(a))) continue
     const prices = perToken.map((m) => m.get(day))
     if (prices.some((p) => p == null || !(p > 0))) continue
     // Missing an underlying price on a given day just means that day cannot
@@ -369,12 +423,12 @@ function buildRows(tokens, snaps, priceMaps) {
       const v = m.get(day)
       return v > 0 ? v : prices[i]
     })
-    const tvl = state.amounts.reduce((a, amt, i) => a + amt * prices[i], 0)
+    const tvl = amounts.reduce((a, amt, i) => a + amt * prices[i], 0)
     if (!(tvl > 0)) continue
     rows.push({
       day,
       symbols,
-      amounts: state.amounts,
+      amounts,
       prices,
       underPrices,
       bpt: state.bpt,
@@ -390,16 +444,16 @@ function buildRows(tokens, snaps, priceMaps) {
  * Full daily series for ONE pool (detail view) — one year of prices.
  * Returns {rows, meta}.
  */
-export async function fetchPoolSeries(address, chain, { force = false, meta } = {}) {
-  const addr = address.toLowerCase()
-  const KEY = `ar.series.v4.${chain}.${addr}`
+export async function fetchPoolSeries(poolId, chain, { force = false, meta } = {}) {
+  const addr = poolId.toLowerCase()
+  const KEY = `ar.series.v5.${chain}.${addr}`
   if (!force) {
     const hit = cacheGet(KEY)
     if (hit) return hit
   }
   const poolMeta = meta || (await fetchPoolMeta(addr, chain))
   const [snaps, priceMaps] = await Promise.all([
-    fetchSnapshots(addr, chain),
+    fetchSnapshots(poolMeta.id || addr, chain),
     fetchChainPrices(chain, tokenPriceAddresses(poolMeta.tokens), 'ONE_YEAR'),
   ])
   const { rows, missingPrices } = buildRows(poolMeta.tokens, snaps, priceMaps)
@@ -441,7 +495,7 @@ export async function scanPools(
     let result
     try {
       const [snaps, priceMaps] = await Promise.all([
-        fetchSnapshots(pool.address, pool.chain, { signal }),
+        fetchSnapshots(pool.id || pool.address, pool.chain, { signal }),
         pricePromises.get(pool.chain),
       ])
       const { rows, missingPrices } = buildRows(pool.tokens, snaps, priceMaps)

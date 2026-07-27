@@ -1,9 +1,9 @@
-# LP vs HODL — every Balancer v3 pool
+# LP vs HODL — every Balancer pool
 
-A dashboard that answers one question for **any Balancer v3 pool** on any chain, of any type
-(Stable, Weighted, AutoRange/reCLAMM, E-CLP/Gyro, QuantAMM) and any number of tokens: over
-the last 30 / 90 / 180 days, would you have had more value **providing liquidity** or just
-**holding the tokens** you would have deposited?
+A dashboard that answers one question for **any Balancer pool** — protocol v1, v2 and v3, on
+every chain, of any type (Stable, Weighted, Composable Stable, AutoRange/reCLAMM, E-CLP/Gyro,
+QuantAMM, CoW AMM) and any number of tokens: over the last 30 / 90 / 180 days, would you have
+had more value **providing liquidity** or just **holding the tokens** you would have deposited?
 
 The landing page is a sortable, filterable **table of every pool** so the answer is scannable
 at a glance — filters for chain, pool type, min TVL and status, plus CSV export, matching the
@@ -21,7 +21,9 @@ Live: https://marcusblabs.github.io/autorange-lp-vs-hodl-dashboard/
 Everything comes from the official **Balancer API** (`api-v3.balancer.fi/graphql`) — no API
 key, no backend:
 
-- `poolGetPools` (protocol version 3, TVL ≥ $1k) — the pool universe, ~143 pools after exclusions.
+- `poolGetPools` (protocol versions 1–3, TVL ≥ $1k) — the pool universe. v2 is the larger half:
+  376 pools / $31M TVL against v3's 143 / $25M, and the single biggest pool anywhere
+  (`20wstETH-80AAVE`, $13M) is v2.
   - **Balancer's own blacklist** is applied at source (`tagNotIn: ["BLACK_LISTED"]`). It is the
     front end's curation and is strictly better than any heuristic for what it covers — test
     pools, dust, and token families with known-bad feeds. It caught 13 pools our data checks
@@ -52,6 +54,37 @@ static file. Drilling into one pool still fetches live (a handful of requests), 
 same modules so the chart and the row it came from are computed identically.
 
 Live per-pool responses are cached in `sessionStorage` for 10 minutes.
+
+### v2 quirks worth knowing
+
+- **v2 pools are keyed by `id`, not `address`.** A v2 id is 32 bytes (address + nonce), and
+  `poolGetPool` / `poolGetSnapshots` match on it. Querying a v2 pool by its address returns
+  **zero snapshots silently** rather than erroring — which looks exactly like "no data". A
+  pasted v2 link carries the full id, so the paste box matches 64 hex chars before 40.
+- **Composable-stable pools pre-mint their own BPT** and hold ~2.6e15 of it as a pool token.
+  It is phantom, not liquidity: it is dropped from the basket. `totalShares` is already the
+  *circulating* supply, so it must **not** also be reduced — doing that sends it negative.
+- **Some v2 snapshots carry epoch-era timestamps** (1970). Walking the calendar from there
+  would burn ~20k empty iterations per pool, so snapshots before 2020 are ignored.
+- Old linear-pool BPTs (`bb-a-WETH`, `bb-euler-USD`) have no price series, so a handful of
+  legacy composable-stable pools are skipped for want of prices.
+
+### Annualised column
+
+`APR` is the **annualised out/under-performance against holding**, compounded:
+
+```
+(LP / HODL) ^ (365 / days) − 1
+```
+
+taken from the longest window with at least **14 days**. Both legs are indexed to 100 at entry,
+so their ratio is the pure relative result — the tokens' own price moves are already divided out,
+which is why the reference is the HODL leg rather than USD or a risk-free rate. It follows the
+**vs** switch, so it annualises against vault tokens or underlying to match what you are reading.
+
+It compounds the *ratio* rather than scaling the *difference* (`gap × 365/days`), because the two
+legs grow multiplicatively. Short windows are excluded deliberately: raising a few days of noise
+to the power of ~50 produces confident-looking nonsense. It is a realised rate, not a forecast.
 
 ### Trust guard: TVL reconciliation
 

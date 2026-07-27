@@ -12,7 +12,9 @@ import GapChart from './components/GapChart'
 import { shortAddr, fmtUsd } from './lib/format'
 
 const WIN_LABEL = { 1: '1D', 7: '7D', 14: '14D', 30: '30D', 60: '60D', 90: '90D', 180: '180D' }
-const ADDR_RE = /0x[0-9a-fA-F]{40}/
+// A v2 balancer.fi link carries the 32-byte pool id; matching only 40 hex
+// chars would silently truncate it into a meaningless address.
+const POOL_RE = /0x[0-9a-fA-F]{64}|0x[0-9a-fA-F]{40}/
 
 export default function App() {
   const [scan, setScan] = useState(null)
@@ -52,7 +54,7 @@ export default function App() {
     if (!target) return
     const seq = ++loadSeq.current
     setStatus('loading'); setError(null); setSeries(null); setMeta(null)
-    fetchPoolSeries(target.address, target.chain)
+    fetchPoolSeries(target.id || target.address, target.chain)
       .then(({ rows, meta: m }) => {
         if (seq !== loadSeq.current) return
         const norm = normalizeSeries(rows)
@@ -87,18 +89,18 @@ export default function App() {
   )
 
   async function openPasted() {
-    const m = paste.match(ADDR_RE)
+    const m = paste.match(POOL_RE)
     if (!m) { setScanErr(new Error('Paste a Balancer pool link or a 0x pool address.')); return }
     const addr = m[0].toLowerCase()
     // if it's already in the scan we know the chain without a round-trip
-    const known = scan?.rows.find((r) => r.address === addr)
-    if (known) { setPaste(''); setTarget({ address: addr, chain: known.chain }); return }
+    const known = scan?.rows.find((r) => r.address === addr || r.id?.toLowerCase() === addr)
+    if (known) { setPaste(''); setTarget({ id: known.id, address: known.address, chain: known.chain }); return }
     setResolving(true); setScanErr(null)
     try {
       const r = await resolvePool(addr)
-      if (!r) throw new Error('That pool was not found on any Balancer v3 chain.')
+      if (!r) throw new Error('That pool was not found on any Balancer chain.')
       setPaste('')
-      setTarget({ address: addr, chain: r.chain })
+      setTarget({ id: r.id, address: r.address || addr, chain: r.chain })
     } catch (e) {
       setScanErr(e)
     } finally {
@@ -113,14 +115,14 @@ export default function App() {
         <div className="head">
           <h1>
             LP vs HODL
-            <span className="tag">Balancer v3 · every pool, every chain</span>
+            <span className="tag">Balancer v1 · v2 · v3 — every pool, every chain</span>
           </h1>
           <p>
-            For every Balancer v3 pool: would you have more value <b>providing liquidity</b> or just{' '}
-            <b>holding the tokens</b> you would have deposited? Each number is the pool’s
-            value-per-share — which already nets swap fees, impermanent loss and the LVR paid to
-            arbitrageurs — measured against that same basket simply held. Sort, filter, or click a
-            row for the full chart.
+            For every Balancer pool — v1, v2 and v3, on every chain: would you have more value{' '}
+            <b>providing liquidity</b> or just <b>holding the tokens</b> you would have deposited?
+            Each number is the pool’s value-per-share — which already nets swap fees, impermanent
+            loss and the LVR paid to arbitrageurs — measured against that same basket simply held.
+            Sort, filter, or click a row for the full chart.
           </p>
         </div>
 
@@ -154,7 +156,7 @@ export default function App() {
             generatedAt={scan.generatedAt}
             blacklistedCount={scan.blacklistedCount}
             excludedChains={scan.excludedChains}
-            onSelect={(r) => setTarget({ address: r.address, chain: r.chain })}
+            onSelect={(r) => setTarget({ id: r.id, address: r.address, chain: r.chain })}
           />
         )}
       </>
@@ -280,7 +282,15 @@ export default function App() {
             both legs equally and so cancel out; external gauge/Merkl incentives are not included and
             would lift the LP leg.
             {' '}
-            <a href={BALANCER_POOL_URL(target.chain, target.address)} target="_blank" rel="noreferrer">
+            <a
+              href={BALANCER_POOL_URL(
+                target.chain,
+                (meta?.protocolVersion ?? 3) === 2 ? (meta?.id || target.id || target.address) : target.address,
+                meta?.protocolVersion ?? 3
+              )}
+              target="_blank"
+              rel="noreferrer"
+            >
               Balancer pool ({chainName(target.chain)})
             </a>
             {' · '}

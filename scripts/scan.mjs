@@ -54,6 +54,24 @@ const PRICE_DRIFT_MAX = 50 // max/min ratio for one token over the series
 const STABLE_RATIO_MAX = 2 // pairwise price drift allowed inside a STABLE pool
 const GAP_ABS_MAX = 100 // percent
 
+/**
+ * Annualise a window's out/under-performance against holding.
+ *
+ * Compounds the ratio of the two legs rather than scaling their difference:
+ * (LP/HODL)^(365/days) - 1. Both legs start at 100, so the ratio is the pure
+ * relative result with the tokens' own price moves already divided out.
+ *
+ * Windows shorter than MIN_ANNUALISE_DAYS return null: raising a few days of
+ * noise to the power of ~50 produces confident-looking nonsense.
+ */
+const MIN_ANNUALISE_DAYS = 14
+function annualise(lp, hodl, days) {
+  if (!(days >= MIN_ANNUALISE_DAYS) || !(lp > 0) || !(hodl > 0)) return null
+  const r = Math.pow(lp / hodl, 365 / days) - 1
+  if (!isFinite(r)) return null
+  return +(r * 100).toFixed(2)
+}
+
 function reconcile(series) {
   let checked = 0
   let ok = 0
@@ -174,6 +192,11 @@ for (const r of results) {
           drag: +c.dragPct.toFixed(3),
           entry: c.entryDate,
           days: c.availDays,
+          // Annualised out/under-performance vs holding, compounded:
+          //   (LP/HODL)^(365/days) - 1
+          // A rate, not a forecast — see the note in PoolTable.
+          apr: annualise(c.lpFinal, c.hodlFinal, c.availDays),
+          aprU: annualise(c.lpFinal, c.hodlUnderFinal, c.availDays),
         }
       : null
 
@@ -209,6 +232,8 @@ for (const r of results) {
   // column guarantees each row still says something.
   win.full = packWindow(s.full)
   rows.push({
+    id: pool.id,
+    protocolVersion: pool.protocolVersion,
     address: pool.address,
     chain: pool.chain,
     type: pool.type,
