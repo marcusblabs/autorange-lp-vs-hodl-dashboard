@@ -1,0 +1,58 @@
+name: Refresh scan and deploy
+
+# The scan table is precomputed rather than fetched in the browser: a live
+# client-side scan of every v3 pool needs ~200 API calls and Balancer's
+# endpoint (behind Cloudflare) starts returning 429 partway through, silently
+# dropping most pools. The source data is daily snapshots, so a nightly
+# rebuild is exactly as fresh as the data itself — and visitors just load one
+# static JSON.
+
+on:
+  schedule:
+    - cron: '17 4 * * *' # 04:17 UTC daily, off the hour to avoid the stampede
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Polite, low-concurrency scan with 429 backoff — takes ~10-15 min.
+      # If it fails we keep the scan.json already committed in the repo rather
+      # than shipping an empty table.
+      - name: Refresh scan data
+        run: npm run scan
+        continue-on-error: true
+
+      - run: npm run build
+
+      - name: Publish dist to gh-pages
+        run: |
+          cd dist
+          git init -q -b gh-pages
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Deploy ${GITHUB_SHA::7}"
+          git push -q --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

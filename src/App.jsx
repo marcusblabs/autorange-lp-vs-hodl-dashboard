@@ -1,104 +1,77 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  WINDOWS, FALLBACK_POOLS, chainName,
+  WINDOWS, chainName, SCAN_URL,
   DUNE_QUERY_ID, DUNE_QUERY_URL, BALANCER_POOL_URL, EXPLORER_ADDR,
 } from './config'
-import { fetchReclammPools, fetchPoolSeries, resolvePool } from './lib/balancer'
+import { fetchPoolSeries, resolvePool } from './lib/balancer'
 import { normalizeSeries, computeWindow, maxWindowDays, isLive } from './lib/series'
+import PoolTable from './components/PoolTable'
 import StatCards from './components/StatCards'
 import ValueChart from './components/ValueChart'
 import GapChart from './components/GapChart'
 import { shortAddr, fmtUsd } from './lib/format'
 
 const WIN_LABEL = { 1: '1D', 7: '7D', 14: '14D', 30: '30D', 60: '60D', 90: '90D', 180: '180D' }
-const poolKey = (p) => `${p.chain}:${p.address}`
-
-function uniqueLabels(list) {
-  // Same token pair can exist as several pools (even on one chain) —
-  // disambiguate duplicate chain+pair labels with the short address.
-  const counts = list.reduce((m, p) => {
-    const k = `${p.chain}|${p.label}`
-    return m.set(k, (m.get(k) || 0) + 1)
-  }, new Map())
-  return list.map((p) =>
-    counts.get(`${p.chain}|${p.label}`) > 1 ? { ...p, label: `${p.label} (${shortAddr(p.address)})` } : p
-  )
-}
+const ADDR_RE = /0x[0-9a-fA-F]{40}/
 
 export default function App() {
-  const [pools, setPools] = useState(null) // null until the live list arrives
-  const [selKey, setSelKey] = useState('')
-  const [custom, setCustom] = useState('')
-  const [windowDays, setWindowDays] = useState(30)
+  const [scan, setScan] = useState(null)
+  const [scanErr, setScanErr] = useState(null)
+  const [target, setTarget] = useState(null) // {address, chain, label?} → detail view
+  const [paste, setPaste] = useState('')
+  const [resolving, setResolving] = useState(false)
+
+  // detail-view state
   const [series, setSeries] = useState(null)
-  const [active, setActive] = useState(null) // {address, chain} actually loaded
-  const [status, setStatus] = useState('idle') // idle | loading | ready | error
+  const [meta, setMeta] = useState(null)
+  const [windowDays, setWindowDays] = useState(30)
+  const [status, setStatus] = useState('idle')
   const [error, setError] = useState(null)
   const loadSeq = useRef(0)
 
-  // Live reCLAMM pool list across all chains, highest-TVL pool preselected.
+  const view = target ? 'detail' : 'table'
+  useEffect(() => {
+    document.body.dataset.view = view
+  }, [view])
+
+  // ---- the precomputed scan table ----
   useEffect(() => {
     let on = true
-    fetchReclammPools()
-      .then((list) => {
-        if (!on) return
-        const merged = uniqueLabels(list)
-        setPools(merged)
-        setSelKey((prev) => prev || (merged[0] ? poolKey(merged[0]) : ''))
+    fetch(SCAN_URL)
+      .then((r) => {
+        if (!r.ok) throw new Error(`scan.json ${r.status}`)
+        return r.json()
       })
-      .catch(() => {
-        if (!on) return
-        setPools(FALLBACK_POOLS)
-        setSelKey((prev) => prev || poolKey(FALLBACK_POOLS[0]))
-      })
+      .then((d) => on && setScan(d))
+      .catch((e) => on && setScanErr(e))
     return () => { on = false }
   }, [])
 
-  const customAddr = custom.trim().toLowerCase()
-
-  async function load({ force = false } = {}) {
+  // ---- live per-pool detail ----
+  useEffect(() => {
+    if (!target) return
     const seq = ++loadSeq.current
-    let target
-    try {
-      if (customAddr) {
-        if (!/^0x[0-9a-f]{40}$/.test(customAddr)) return // still typing — wait for a full address
-        setStatus('loading'); setError(null)
-        const r = await resolvePool(customAddr)
+    setStatus('loading'); setError(null); setSeries(null); setMeta(null)
+    fetchPoolSeries(target.address, target.chain)
+      .then(({ rows, meta: m }) => {
         if (seq !== loadSeq.current) return
-        if (!r) {
-          setSeries(null); setStatus('error')
-          setError(new Error('Pool not found on any Balancer v3 chain.'))
+        const norm = normalizeSeries(rows)
+        if (norm.length < 2) {
+          setStatus('error')
+          setError(new Error('Not enough daily history for this pool yet (needs at least 2 trading days).'))
           return
         }
-        target = { address: customAddr, chain: r.chain }
-      } else {
-        const p = (pools || []).find((x) => poolKey(x) === selKey)
-        if (!p) return
-        setStatus('loading'); setError(null)
-        target = { address: p.address, chain: p.chain }
-      }
-      const rows = await fetchPoolSeries(target.address, target.chain, { force })
-      if (seq !== loadSeq.current) return
-      const norm = normalizeSeries(rows)
-      if (norm.length < 2) {
-        setSeries(null); setActive(target); setStatus('error')
-        setError(new Error('Not enough daily history for this pool yet (needs at least 2 trading days).'))
-        return
-      }
-      setSeries(norm); setActive(target); setStatus('ready')
-    } catch (e) {
-      if (seq !== loadSeq.current) return
-      setSeries(null); setStatus('error'); setError(e)
-    }
-  }
-
-  // reload on selection / custom-address change
-  useEffect(() => { load() /* eslint-disable-next-line */ }, [selKey, customAddr, pools])
+        setSeries(norm); setMeta(m); setStatus('ready')
+      })
+      .catch((e) => {
+        if (seq !== loadSeq.current) return
+        setStatus('error'); setError(e)
+      })
+  }, [target])
 
   const maxWin = series ? maxWindowDays(series) : 0
   const live = series ? isLive(series) : false
 
-  // keep the selected window feasible
   useEffect(() => {
     if (!series) return
     if (windowDays != null && windowDays > maxWin) {
@@ -113,48 +86,101 @@ export default function App() {
     [series, windowDays]
   )
 
+  async function openPasted() {
+    const m = paste.match(ADDR_RE)
+    if (!m) { setScanErr(new Error('Paste a Balancer pool link or a 0x pool address.')); return }
+    const addr = m[0].toLowerCase()
+    // if it's already in the scan we know the chain without a round-trip
+    const known = scan?.rows.find((r) => r.address === addr)
+    if (known) { setPaste(''); setTarget({ address: addr, chain: known.chain }); return }
+    setResolving(true); setScanErr(null)
+    try {
+      const r = await resolvePool(addr)
+      if (!r) throw new Error('That pool was not found on any Balancer v3 chain.')
+      setPaste('')
+      setTarget({ address: addr, chain: r.chain })
+    } catch (e) {
+      setScanErr(e)
+    } finally {
+      setResolving(false)
+    }
+  }
+
+  // ------------------------------------------------------------------ table
+  if (view === 'table') {
+    return (
+      <>
+        <div className="head">
+          <h1>
+            LP vs HODL
+            <span className="tag">Balancer v3 · every pool, every chain</span>
+          </h1>
+          <p>
+            For every Balancer v3 pool: would you have more value <b>providing liquidity</b> or just{' '}
+            <b>holding the tokens</b> you would have deposited? Each number is the pool’s
+            value-per-share — which already nets swap fees, impermanent loss and the LVR paid to
+            arbitrageurs — measured against that same basket simply held. Sort, filter, or click a
+            row for the full chart.
+          </p>
+        </div>
+
+        <div className="tablebar" style={{ marginBottom: 18 }}>
+          <input
+            className="search"
+            type="text"
+            placeholder="Paste a balancer.fi pool link or 0x address…"
+            value={paste}
+            onChange={(e) => setPaste(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && openPasted()}
+            spellCheck={false}
+          />
+          <button className="btn" onClick={openPasted} disabled={resolving || !paste.trim()}>
+            {resolving ? 'Finding…' : 'Analyse'}
+          </button>
+          <span className="muted tinystat">
+            {scan
+              ? `${scan.rows.length} pools · refreshed ${String(scan.generatedAt).slice(0, 10)}`
+              : scanErr ? '' : 'loading…'}
+          </span>
+        </div>
+
+        {scanErr && <div className="err">{String(scanErr.message || scanErr)}</div>}
+
+        {!scan && !scanErr && <div className="loading">Loading the pool table…</div>}
+
+        {scan && (
+          <PoolTable
+            rows={scan.rows}
+            generatedAt={scan.generatedAt}
+            onSelect={(r) => setTarget({ address: r.address, chain: r.chain })}
+          />
+        )}
+      </>
+    )
+  }
+
+  // ----------------------------------------------------------------- detail
   return (
     <>
+      <button className="backbtn" onClick={() => setTarget(null)}>← all pools</button>
+
       <div className="head">
         <h1>
-          AutoRange — LP vs HODL
-          <span className="tag">Balancer v3 reCLAMM · all chains</span>
+          {meta ? meta.label : shortAddr(target.address)}
+          <span className="tag">
+            {chainName(target.chain)}
+            {meta ? ` · ${meta.type}` : ''}
+            {meta?.tvl ? ` · ${fmtUsd(meta.tvl)} TVL` : ''}
+          </span>
         </h1>
         <p>
-          For any AutoRange (reCLAMM) pool: would you have more value <b>providing liquidity</b> or
-          just <b>holding the two tokens</b>? Value-per-share of the pool — which already nets fees,
-          impermanent loss and the LVR cost of auto-ranging — against the deposited basket, indexed
-          to 100 at entry. Live pools on every Balancer chain, straight from the official API — no
-          key needed. Pick a pool and a look-back window.
+          Value of <b>$100</b> put in as <b>liquidity</b> versus <b>simply holding</b> the same
+          basket, indexed to 100 at entry. The gap between the two lines is what providing liquidity
+          actually earned or cost you.
         </p>
       </div>
 
       <div className="controls">
-        <div className="field">
-          <label>Pool {pools ? `(${pools.length} live)` : '(loading list…)'}</label>
-          <select
-            value={customAddr ? '' : selKey}
-            onChange={(e) => { setCustom(''); setSelKey(e.target.value) }}
-            disabled={!pools}
-          >
-            {(pools || []).map((p) => (
-              <option key={poolKey(p)} value={poolKey(p)}>
-                {p.label} · {chainName(p.chain)}{p.tvl > 0 ? ` · ${fmtUsd(p.tvl)}` : ''}
-              </option>
-            ))}
-            {customAddr ? <option value="">custom address</option> : null}
-          </select>
-        </div>
-        <div className="field">
-          <label>…or custom reCLAMM address</label>
-          <input
-            type="text"
-            placeholder="0x… (any Balancer chain)"
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            spellCheck={false}
-          />
-        </div>
         <div className="field">
           <label>Look-back window</label>
           <div className="seg">
@@ -173,24 +199,12 @@ export default function App() {
             </button>
           </div>
         </div>
-        <div className="field">
-          <label>&nbsp;</label>
-          <button
-            className="btn ghost"
-            disabled={status === 'loading'}
-            onClick={() => load({ force: true })}
-            title="Refetch snapshots and prices from the Balancer API"
-          >
-            {status === 'loading' ? 'Loading…' : 'Refresh'}
-          </button>
-        </div>
       </div>
 
       {error && <div className="err">{String(error.message || error)}</div>}
+      {status === 'loading' && <div className="loading">Loading from the Balancer API…</div>}
 
-      {status === 'loading' && !series && <div className="loading">Loading from the Balancer API…</div>}
-
-      {win && active && (
+      {win && (
         <>
           {win.clamped && (
             <div className="note">
@@ -198,23 +212,31 @@ export default function App() {
               available life instead of the requested {windowDays}-day window.
             </div>
           )}
+          {meta?.incentiveApr > 0 && (
+            <div className="note">
+              This pool also pays roughly <b>{(meta.incentiveApr * 100).toFixed(1)}% APR</b> in
+              external incentives (Merkl / staking). Those go to liquidity providers only and are{' '}
+              <b>not</b> included below — the real LP result is better than shown here.
+            </div>
+          )}
 
           <StatCards win={win} />
 
           <div className="panel">
             <h2>
-              {win.sym0} / {win.sym1} — position value over time
+              {win.label} — position value over time
               <span className="tag">
-                {chainName(active.chain)} · {live ? 'live · trailing from today' : `as of ${win.endDate} (no trading activity since)`}
+                {chainName(target.chain)} ·{' '}
+                {live ? 'live · trailing from today' : `as of ${win.endDate} (no trading activity since)`}
               </span>
             </h2>
             <p className="ph">
               $100 entered {win.entryDate}, indexed to 100. The gap between the lines is the LP’s
-              fee-minus-LVR result; both move together with the token prices.
+              fee-minus-divergence result; both move together with the token prices.
             </p>
             <div className="legend">
-              <span><span className="dot" style={{ background: 'var(--purple)' }} /><b>LP (AutoRange)</b></span>
-              <span><span className="dot" style={{ background: 'var(--green)' }} /><b>HODL (2-token basket)</b></span>
+              <span><span className="dot" style={{ background: 'var(--purple)' }} /><b>LP (in the pool)</b></span>
+              <span><span className="dot" style={{ background: 'var(--green)' }} /><b>HODL ({win.nTokens}-token basket)</b></span>
             </div>
             <ValueChart pts={win.pts} />
           </div>
@@ -229,19 +251,19 @@ export default function App() {
           </div>
 
           <p className="foot">
-            <b>Method:</b> LP value-per-share = (res₀·p₀ + res₁·p₁) / BPT supply from the Balancer
-            API’s official daily pool snapshots — reserves are subgraph-accurate and already exclude
-            the protocol-fee skim; it nets fees, IL and the LVR cost of auto-ranging (reCLAMM’s range
-            shift is virtual and in-protocol — no keeper or LP gas). HODL = the basket per share at
-            entry, held and marked with the same daily prices (same API). Gauge incentives are not
-            included — where they exist they would lift the LP leg.
+            <b>Method:</b> LP value-per-share = Σ(reserve·price) / BPT supply from the Balancer API’s
+            official daily pool snapshots — reserves are subgraph-accurate and already exclude the
+            protocol-fee skim, so this nets swap fees, impermanent loss and LVR. HODL = the basket
+            per share at entry, held and marked with the same daily prices. Yield-bearing tokens lift
+            both legs equally and so cancel out; external gauge/Merkl incentives are not included and
+            would lift the LP leg.
             {' '}
-            <a href={BALANCER_POOL_URL(active.chain, active.address)} target="_blank" rel="noreferrer">
-              Balancer pool ({chainName(active.chain)})
+            <a href={BALANCER_POOL_URL(target.chain, target.address)} target="_blank" rel="noreferrer">
+              Balancer pool ({chainName(target.chain)})
             </a>
             {' · '}
-            <a href={EXPLORER_ADDR(active.chain, active.address)} target="_blank" rel="noreferrer">{shortAddr(active.address)}</a>
-            {active.chain === 'MAINNET' && (
+            <a href={EXPLORER_ADDR(target.chain, target.address)} target="_blank" rel="noreferrer">{shortAddr(target.address)}</a>
+            {target.chain === 'MAINNET' && (
               <>
                 {' · '}cross-check:{' '}
                 <a href={DUNE_QUERY_URL} target="_blank" rel="noreferrer">Dune #{DUNE_QUERY_ID}</a>

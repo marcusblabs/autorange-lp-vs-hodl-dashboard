@@ -8,6 +8,11 @@
 
 export const WINDOWS = [1, 7, 14, 30, 60, 90, 180]
 
+// Precomputed scan table (scripts/scan.mjs → public/scan.json, refreshed
+// nightly by CI). Served from the app's own base path so it works both at the
+// dev root and under the GitHub Pages subpath.
+export const SCAN_URL = `${import.meta.env.BASE_URL}scan.json`
+
 // Per-chain display name, Balancer UI slug, and explorer address URL.
 // Chains without an entry fall back to the Balancer pool page only.
 export const CHAIN_INFO = {

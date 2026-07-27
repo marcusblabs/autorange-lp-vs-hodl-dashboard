@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "scan": "node scripts/scan.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "predeploy": "vite build",

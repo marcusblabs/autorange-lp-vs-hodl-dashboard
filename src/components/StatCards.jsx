@@ -13,7 +13,9 @@ export default function StatCards({ win }) {
       <div className="card">
         <div className="lbl"><span className="dot" style={{ background: 'var(--green)' }} />HODL — final value</div>
         <div className="val">{fmtMoney2(win.hodlFinal)}</div>
-        <div className="sub">same two tokens, just held</div>
+        <div className="sub">
+          same {win.nTokens === 2 ? 'two tokens' : `${win.nTokens} tokens`}, just held
+        </div>
       </div>
       <div className="card">
         <div className="lbl">LP − HODL</div>

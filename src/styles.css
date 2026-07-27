@@ -26,6 +26,8 @@ body {
 }
 
 #root { max-width: 1100px; margin: 0 auto; padding: 30px 26px 56px; }
+/* the scan table needs more room than a single-pool chart page */
+body[data-view='table'] #root { max-width: 1340px; }
 
 a { color: var(--purple-soft); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -125,3 +127,65 @@ svg { width: 100%; display: block; overflow: visible; }
 @media (max-width: 720px) {
   .cards { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ---- scan table ---- */
+.tablebar {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 4px 0 14px;
+}
+.search {
+  background: var(--panel); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 9px 12px; font-family: inherit; font-size: 13.5px;
+  outline: none; min-width: 300px; flex: 1; max-width: 460px;
+}
+.search:focus { border-color: var(--purple); }
+.seg.sm button { padding: 5px 9px; font-size: 12px; }
+.tinystat { font-size: 12.5px; margin-left: auto; }
+
+.tablewrap {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--elev); overflow-x: auto; margin-bottom: 16px;
+}
+table.pooltable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pooltable th {
+  position: sticky; top: 0; z-index: 1; background: var(--panel2);
+  text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.045em; color: var(--muted); padding: 10px 12px;
+  border-bottom: 1px solid var(--line); cursor: pointer; white-space: nowrap;
+  user-select: none;
+}
+.pooltable th:hover { color: var(--text); }
+.pooltable th.sorted { color: var(--text); }
+.pooltable th .arrow { font-size: 8px; margin-left: 4px; vertical-align: middle; }
+.pooltable th.r { text-align: right; }
+.pooltable td { padding: 9px 12px; border-bottom: 1px solid rgba(82, 91, 105, 0.4); white-space: nowrap; }
+.pooltable td.r { text-align: right; }
+.pooltable td.num { font-variant-numeric: tabular-nums; }
+.pooltable tbody tr { cursor: pointer; }
+.pooltable tbody tr:hover td { background: rgba(127, 106, 232, 0.09); }
+.pooltable tbody tr:last-child td { border-bottom: 0; }
+.pooltable td.pool { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+.pooltable .plabel { font-weight: 500; }
+.pooltable td.dimtext { color: var(--muted); }
+.pooltable .dim { color: var(--muted); opacity: 0.55; }
+
+.mini {
+  display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px;
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.03em; vertical-align: middle;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--muted);
+}
+.mini.warn { background: rgba(242, 192, 99, 0.13); border-color: rgba(242, 192, 99, 0.4); color: var(--amber); }
+.mini.dim { opacity: 0.6; }
+
+.backbtn {
+  background: none; border: 0; color: var(--purple-soft); cursor: pointer;
+  font-family: inherit; font-size: 13px; padding: 0; margin-bottom: 12px;
+}
+.backbtn:hover { text-decoration: underline; }
+
+@media (max-width: 900px) {
+  .tinystat { margin-left: 0; }
+  .search { min-width: 200px; }
+}
+.mini.flag { background: rgba(242, 99, 110, 0.14); border-color: rgba(242, 99, 110, 0.45); color: var(--red); }
+.btn.small { padding: 6px 10px; font-size: 12px; }
+.btn.ghost.on { border-color: var(--purple); color: var(--purple-soft); }
