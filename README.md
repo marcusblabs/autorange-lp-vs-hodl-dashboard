@@ -117,6 +117,15 @@ evidence is not a pass; the check fails closed.
   A pool drained to dust shares makes value-per-share degenerate (a seeded-then-drained test pool
   showed a 2.5e15× fake "LP return"); real mass exits never go that deep (the Feb-2026
   withdrawal left 0.9% of max supply).
+- **The series ends on the last completed UTC day.** Today's snapshot covers only the hours
+  elapsed so far — its reserves are mid-day, its `fees24h` is partial, and its price is whichever
+  intraday tick arrived last. Including it makes the answer a function of *when you looked*: on
+  2026-08-05 the AAVE/WETH reCLAMM read **+0.08%** to the nightly scan at 07:02 UTC, **−0.94%** to
+  a browser that afternoon, and **−0.85%** at 19:17 — same pool, same entry date, same day count.
+  The table and the chart could not agree by construction. Dropping the in-progress day costs up
+  to 24h of freshness and makes every reader compute an identical series; `scan.mjs` aborts rather
+  than publish a row that ends on today, and the detail view pins itself to the table's
+  `throughDay` when the two are a day apart (but not when the table is stale).
 
 ### Why snapshots, not event replay
 

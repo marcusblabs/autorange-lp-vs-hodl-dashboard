@@ -260,8 +260,29 @@ for (const r of results) {
 }
 
 rows.sort((a, b) => b.tvl - a.tvl)
+
+// No row may end on today: the current UTC day is still accumulating, so its
+// value depends on the hour the scan happened to run. That is what made this
+// table disagree with the detail view — both quoted the same window and the
+// same entry date while reading different intraday states of the same final
+// day. normalizeSeries drops it; this asserts it stayed dropped, because the
+// failure is silent and surfaces only as two screens showing different numbers.
+const today = new Date().toISOString().slice(0, 10)
+const leaked = rows.filter((r) => r.lastDay >= today)
+if (leaked.length) {
+  console.error(
+    `\nABORT: ${leaked.length} rows end on the incomplete day ${today} ` +
+      `(e.g. ${leaked[0].label}). The table and the live detail view would disagree.`
+  )
+  process.exit(1)
+}
+
 const out = {
   generatedAt: new Date().toISOString(),
+  // The last completed day the rows are computed through. The detail view
+  // derives the same boundary from its own clock; carrying it makes any future
+  // divergence diagnosable instead of a mystery.
+  throughDay: rows.reduce((a, r) => (r.lastDay > a ? r.lastDay : a), ''),
   windows: WINDOWS,
   minTvl: SCAN_MIN_TVL_USD,
   excludedChains,

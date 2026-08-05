@@ -43,8 +43,19 @@ function tradedBetween(a, b) {
 /**
  * Parse, sort, dedupe and trim a raw daily series.
  * Rows in: {day, symbols[], amounts[], prices[], bpt, tvl}
+ *
+ * The current UTC day is dropped. It is still being written: the snapshot's
+ * reserves and fees24h cover only the hours elapsed so far, and the day's
+ * price is whichever intraday tick happened to arrive last. Keeping it makes
+ * the answer depend on the clock — the nightly scan reads "today" at 03:00 and
+ * a browser opening the same pool at 19:00 reads a different "today", so the
+ * table and the detail view disagree while both claim the same window. On the
+ * AAVE/WETH reCLAMM that was a full point (+0.08% against -0.94%) with an
+ * identical entry date and day count. Ending on the last completed day costs
+ * up to 24h of freshness and makes every reader compute the same series.
  */
-export function normalizeSeries(rows) {
+export function normalizeSeries(rows, nowMs = Date.now()) {
+  const today = new Date(nowMs).toISOString().slice(0, 10)
   const pts = (rows || [])
     .map((r) => ({
       day: String(r.day).slice(0, 10),
@@ -65,6 +76,7 @@ export function normalizeSeries(rows) {
     }))
     .filter(
       (p) =>
+        p.day < today &&
         p.bpt > 0 &&
         isFinite(p.tvl) &&
         p.tvl > 0 &&
@@ -203,6 +215,18 @@ export function computeWindow(series, windowDays) {
 }
 
 /**
+ * Is a pool with `maxWin` days of history old enough to quote a `w`-day window?
+ * Needs ~80% of it: a 25-day-old pool still gets a usable "30D" figure, which
+ * matters for young reCLAMM pools, and the shortfall is disclosed where shown.
+ *
+ * Exported because the table and the detail view must apply the SAME rule.
+ * They did not: the table quoted 30D at 80% coverage while the chart disabled
+ * its 30D button below 100%, so a 25-day-old pool had a 30D number in the list
+ * and no 30D view to check it against.
+ */
+export const windowFits = (maxWin, w) => maxWin >= w * 0.8
+
+/**
  * Summary row for the scan table: LP−HODL at each requested window.
  * Windows the pool is too young for come back null (rendered as "—").
  */
@@ -210,8 +234,7 @@ export function summarize(series, windows) {
   const maxWin = maxWindowDays(series)
   const out = { maxWin, live: isLive(series), byWindow: {} }
   for (const w of windows) {
-    // needs at least ~80% of the window to be a fair comparison
-    out.byWindow[w] = maxWin >= w * 0.8 ? computeWindow(series, w) : null
+    out.byWindow[w] = windowFits(maxWin, w) ? computeWindow(series, w) : null
   }
   out.full = computeWindow(series, null)
   return out

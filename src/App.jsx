@@ -4,7 +4,7 @@ import {
   DUNE_QUERY_ID, DUNE_QUERY_URL, BALANCER_POOL_URL, EXPLORER_ADDR,
 } from './config'
 import { fetchPoolSeries, resolvePool } from './lib/balancer'
-import { normalizeSeries, computeWindow, maxWindowDays, isLive } from './lib/series'
+import { normalizeSeries, computeWindow, maxWindowDays, isLive, windowFits } from './lib/series'
 import PoolTable from './components/PoolTable'
 import StatCards from './components/StatCards'
 import ValueChart from './components/ValueChart'
@@ -15,6 +15,28 @@ const WIN_LABEL = { 1: '1D', 7: '7D', 14: '14D', 30: '30D', 60: '60D', 90: '90D'
 // A v2 balancer.fi link carries the 32-byte pool id; matching only 40 hex
 // chars would silently truncate it into a meaningless address.
 const POOL_RE = /0x[0-9a-fA-F]{64}|0x[0-9a-fA-F]{40}/
+const DAY_MS = 86400000
+
+/**
+ * End the chart on the same completed day the table was built through.
+ *
+ * Both sides already drop the in-progress UTC day, which is what made them
+ * disagree. That still leaves the hours between UTC midnight and the nightly
+ * scan, when a browser has rolled onto a new completed day and the table has
+ * not — the same complaint, one day wide, every night.
+ *
+ * Only followed when the table is at most a day behind. If scan.json is stale
+ * because CI has been failing, pinning to it would silently throw away days of
+ * good chart data to match a table that is itself wrong; better to let the two
+ * dates differ visibly, which the "through <date>" labels now show.
+ */
+function clampToScanDay(series, throughDay) {
+  if (!throughDay || !series.length) return series
+  const end = series[series.length - 1].day
+  if (throughDay >= end) return series
+  if (Date.parse(end) - Date.parse(throughDay) > DAY_MS) return series
+  return series.filter((p) => p.day <= throughDay)
+}
 
 export default function App() {
   const [scan, setScan] = useState(null)
@@ -61,7 +83,7 @@ export default function App() {
     fetchPoolSeries(target.id || target.address, target.chain)
       .then(({ rows, meta: m }) => {
         if (seq !== loadSeq.current) return
-        const norm = normalizeSeries(rows)
+        const norm = clampToScanDay(normalizeSeries(rows), scan?.throughDay)
         if (norm.length < 2) {
           setStatus('error')
           setError(new Error('Not enough daily history for this pool yet (needs at least 2 trading days).'))
@@ -73,15 +95,15 @@ export default function App() {
         if (seq !== loadSeq.current) return
         setStatus('error'); setError(e)
       })
-  }, [target])
+  }, [target, scan?.throughDay])
 
   const maxWin = series ? maxWindowDays(series) : 0
   const live = series ? isLive(series) : false
 
   useEffect(() => {
     if (!series) return
-    if (windowDays != null && windowDays > maxWin) {
-      const feasible = [...WINDOWS].reverse().find((w) => w <= maxWin)
+    if (windowDays != null && !windowFits(maxWin, windowDays)) {
+      const feasible = [...WINDOWS].reverse().find((w) => windowFits(maxWin, w))
       setWindowDays(feasible ?? null)
     }
     // eslint-disable-next-line
@@ -196,7 +218,7 @@ export default function App() {
               <button
                 key={w}
                 className={windowDays === w ? 'on' : ''}
-                disabled={w > maxWin}
+                disabled={!windowFits(maxWin, w)}
                 onClick={() => setWindowDays(w)}
               >
                 {WIN_LABEL[w]}
@@ -252,7 +274,7 @@ export default function App() {
               {win.label} — position value over time
               <span className="tag">
                 {chainName(target.chain)} ·{' '}
-                {live ? 'live · trailing from today' : `as of ${win.endDate} (no trading activity since)`}
+                {live ? `live · through ${win.endDate}` : `as of ${win.endDate} (no trading activity since)`}
               </span>
             </h2>
             <p className="ph">
@@ -284,7 +306,9 @@ export default function App() {
             protocol-fee skim, so this nets swap fees, impermanent loss and LVR. HODL = the basket
             per share at entry, held and marked with the same daily prices. Yield-bearing tokens lift
             both legs equally and so cancel out; external gauge/Merkl incentives are not included and
-            would lift the LP leg.
+            would lift the LP leg. The series ends on the last <b>completed</b> UTC day — today's
+            snapshot covers only the hours elapsed so far, so including it would make the result
+            depend on what time you loaded the page and disagree with the table.
             {' '}
             <a
               href={BALANCER_POOL_URL(
