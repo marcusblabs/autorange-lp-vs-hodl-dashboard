@@ -44,6 +44,37 @@ const SNAPSHOT_CONCURRENCY = 4
 const MAX_RETRIES = 4
 // Snapshots older than this are corrupt sentinels, not history.
 const MIN_SNAPSHOT_MS = Date.UTC(2020, 0, 1)
+
+/**
+ * Price history range, shared by the scan and the single-pool detail view so
+ * neither can be computed over a different span than the other.
+ *
+ * ONE_YEAR, and NOT `ALL`, despite `ALL` looking better on every surface
+ * measurement: it reaches back to 2023 instead of 12 months, returns exactly
+ * one point per day at 00:00 UTC (matching how pool snapshots are stamped)
+ * rather than 7.36 intraday ticks per day, and is smaller and faster.
+ *
+ * `ALL` rounds prices to two decimal places. Measured against the live API on
+ * the same day:
+ *     SHIB   ALL 0            ONE_YEAR 0.00000492   (all 1245 points zero)
+ *     BAL    ALL 0.12         ONE_YEAR 0.114176     (a 5.1% price error)
+ *     WETH   ALL 1868         ONE_YEAR 1909.11
+ * So it silently zeroes every token under half a cent — buildRows requires a
+ * positive price for each token, so those pools produce no rows at all and
+ * vanish from the table (38 of 527 did) — and quantises every other low-priced
+ * token, corrupting value-per-share for any pool that holds one. The jump to
+ * 191 pools failing TVL reconciliation was this, not the longer history it was
+ * first blamed on.
+ *
+ * The cost of ONE_YEAR is accepted and disclosed rather than papered over:
+ *   - The series cannot exceed ~365 days, so the FULL column is "up to a year",
+ *     which is what the header now says instead of "whole life".
+ *   - Days are bucketed with last-write-wins across ~7 intraday ticks. For a
+ *     COMPLETED day that is consistently its final tick, which is a stable
+ *     daily close; the in-progress day, where this was genuinely unstable, is
+ *     dropped by normalizeSeries.
+ */
+const PRICE_RANGE = 'ONE_YEAR'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function gql(query, { signal, retries = MAX_RETRIES } = {}) {
@@ -358,13 +389,32 @@ async function fetchChainPrices(chain, addresses, range, { signal, concurrency =
   return maps
 }
 
+/**
+ * An empty snapshot list is treated as RETRYABLE.
+ *
+ * Under load this API does not answer a snapshot query with 429 — it answers
+ * HTTP 200 carrying an empty array, which sails straight past the retry-on-429
+ * path and looks exactly like a pool that has no history. The scan then filed
+ * those pools under "too little history" and published a table quietly missing
+ * them: a run that lost 38 of 527 pools this way reported nothing unusual.
+ *
+ * Sampling 25 pools spread across the list, one at a time with 700ms between
+ * requests, returned snapshots for 25 of 25 — a genuinely empty pool is rare
+ * enough that retrying a few times costs little and recovers the throttled
+ * ones. A pool that really has no snapshots still ends up empty, just slower.
+ */
+const SNAPSHOT_EMPTY_RETRIES = 3
 async function fetchSnapshots(poolId, chain, { signal } = {}) {
-  const data = await gql(
-    `{ poolGetSnapshots(id: "${poolId.toLowerCase()}", chain: ${chain}, range: ALL_TIME) {
-         timestamp totalShares amounts totalLiquidity fees24h } }`,
-    { signal }
-  )
-  return data.poolGetSnapshots || []
+  for (let attempt = 0; ; attempt++) {
+    const data = await gql(
+      `{ poolGetSnapshots(id: "${poolId.toLowerCase()}", chain: ${chain}, range: ALL_TIME) {
+           timestamp totalShares amounts totalLiquidity fees24h } }`,
+      { signal }
+    )
+    const snaps = data.poolGetSnapshots || []
+    if (snaps.length || attempt >= SNAPSHOT_EMPTY_RETRIES) return snaps
+    await sleep(700 * (attempt + 1))
+  }
 }
 
 /**
@@ -407,9 +457,16 @@ function buildRows(tokens, snaps, priceMaps) {
 
   const rows = []
   let state = null
+  let underFallbackDays = 0
   for (let ms = firstMs; ms <= lastMs; ms += DAY_MS) {
     const day = new Date(ms).toISOString().slice(0, 10)
-    state = byDay.get(day) || state
+    const snap = byDay.get(day)
+    // Reserves and supply are STATE: no snapshot means no activity, so
+    // forward-filling them is exact. fees24h is a FLOW, and carrying it forward
+    // re-counts the same income once per gap day — a pool that traded once and
+    // then sat idle for a week booked that day's fees eight times.
+    if (snap) state = snap
+    else if (state && state.fees !== 0) state = { ...state, fees: 0 }
     if (!state || !(state.bpt > 0)) continue
     // tokens[i].idx points at the original slot, so filtering the pool's own
     // pre-minted BPT out of the basket does not shift the amounts mapping.
@@ -419,10 +476,19 @@ function buildRows(tokens, snaps, priceMaps) {
     if (prices.some((p) => p == null || !(p > 0))) continue
     // Missing an underlying price on a given day just means that day cannot
     // support the underlying basis; fall back so the wrapped basis still works.
+    // The substitution is COUNTED, not silent: on a day that falls back, the
+    // "underlying" leg is really the wrapped price, so an UNDERLYING figure
+    // built mostly from fallbacks is the vault-token number wearing the wrong
+    // label — and the reader was being told it was the plain USDC they
+    // deposited.
+    let fellBack = false
     const underPrices = perUnder.map((m, i) => {
       const v = m.get(day)
-      return v > 0 ? v : prices[i]
+      if (v > 0) return v
+      if (perUnder[i] !== perToken[i]) fellBack = true
+      return prices[i]
     })
+    if (fellBack) underFallbackDays++
     const tvl = amounts.reduce((a, amt, i) => a + amt * prices[i], 0)
     if (!(tvl > 0)) continue
     rows.push({
@@ -437,7 +503,10 @@ function buildRows(tokens, snaps, priceMaps) {
       fees: state.fees,
     })
   }
-  return { rows, missingPrices: false }
+  // Share of days whose underlying leg is really the wrapped price. Above a
+  // small fraction the UNDERLYING basis is not answerable for this pool.
+  const underFallbackRate = rows.length ? underFallbackDays / rows.length : 0
+  return { rows, missingPrices: false, underFallbackRate }
 }
 
 /**
@@ -454,7 +523,7 @@ export async function fetchPoolSeries(poolId, chain, { force = false, meta } = {
   const poolMeta = meta || (await fetchPoolMeta(addr, chain))
   const [snaps, priceMaps] = await Promise.all([
     fetchSnapshots(poolMeta.id || addr, chain),
-    fetchChainPrices(chain, tokenPriceAddresses(poolMeta.tokens), 'ONE_YEAR'),
+    fetchChainPrices(chain, tokenPriceAddresses(poolMeta.tokens), PRICE_RANGE),
   ])
   const { rows, missingPrices } = buildRows(poolMeta.tokens, snaps, priceMaps)
   if (missingPrices) {
@@ -473,7 +542,7 @@ export async function fetchPoolSeries(poolId, chain, { force = false, meta } = {
  */
 export async function scanPools(
   pools,
-  { range = 'ONE_HUNDRED_EIGHTY_DAY', onResult, signal, concurrency = SNAPSHOT_CONCURRENCY, priceConcurrency = 2 } = {}
+  { range = PRICE_RANGE, onResult, signal, concurrency = SNAPSHOT_CONCURRENCY, priceConcurrency = 2 } = {}
 ) {
   // Chains are processed one at a time (their price sets are large and the
   // API rate-limits bursts); pools within a chain share one price fetch.
@@ -498,8 +567,8 @@ export async function scanPools(
         fetchSnapshots(pool.id || pool.address, pool.chain, { signal }),
         pricePromises.get(pool.chain),
       ])
-      const { rows, missingPrices } = buildRows(pool.tokens, snaps, priceMaps)
-      result = { pool, rows, error: missingPrices ? 'no price history' : null }
+      const { rows, missingPrices, underFallbackRate } = buildRows(pool.tokens, snaps, priceMaps)
+      result = { pool, rows, underFallbackRate, error: missingPrices ? 'no price history' : null }
     } catch (e) {
       if (signal?.aborted) throw e
       result = { pool, rows: [], error: e.message || 'failed' }

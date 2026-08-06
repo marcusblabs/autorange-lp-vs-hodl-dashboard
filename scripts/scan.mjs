@@ -50,7 +50,12 @@ const WINDOWS = [30, 90, 180]
 const RECON_TOLERANCE = 0.05
 const RECON_MIN_PASS = 0.8
 const RECON_MIN_COVERAGE = 0.5
-const PRICE_DRIFT_MAX = 50 // max/min ratio for one token over the series
+// Largest single-day price ratio tolerated for one token. Real assets do move
+// violently — a 3x day is a bad depeg but it happens — so this is set well
+// above market behaviour and aimed at the step changes a rescaled or broken
+// feed produces. The observed cases sit either side of it by a wide margin:
+// worst genuine day in the set is 1.64x, the broken Polygon USDC feed is 101x.
+const PRICE_DRIFT_MAX = 10
 const STABLE_RATIO_MAX = 2 // pairwise price drift allowed inside a STABLE pool
 const GAP_ABS_MAX = 100 // percent
 
@@ -72,20 +77,37 @@ function annualise(lp, hodl, days) {
   return +(r * 100).toFixed(2)
 }
 
+/**
+ * Checked over the most recent RECON_WINDOW_DAYS only.
+ *
+ * The whole series now reaches back ~3.4 years, and judging a pool on 2023
+ * snapshot quality flagged 191 of 446 pools — including wstETH/AAVE at $11.4M —
+ * hiding 47% of all TVL behind the SHOW filter by default. A guard that noisy
+ * gets ignored, which is worse than not having one.
+ *
+ * 180 days is the longest fixed window the table quotes, so this asks the
+ * question that matters: are the numbers on screen reconcilable today? Ancient
+ * disagreement only affects the FULL column and is not worth hiding a pool for.
+ */
+const RECON_WINDOW_DAYS = 180
 function reconcile(series) {
   let checked = 0
   let ok = 0
   let worst = 0
-  for (const p of series) {
+  for (const p of series.slice(-RECON_WINDOW_DAYS)) {
     if (!(p.apiTvl > 0)) continue
     checked++
     const err = Math.abs(p.tvl - p.apiTvl) / p.apiTvl
     if (err > worst) worst = err
     if (err <= RECON_TOLERANCE) ok++
   }
+  // Coverage is against the days actually examined, not the whole series —
+  // otherwise a four-year pool looks 95% "unverified" purely because the
+  // window is 180 days long.
+  const examined = Math.min(series.length, RECON_WINDOW_DAYS)
   return {
     checked,
-    coverage: series.length ? checked / series.length : 0,
+    coverage: examined ? checked / examined : 0,
     pass: checked ? ok / checked : 0,
     worst,
   }
@@ -126,26 +148,43 @@ function stableRatioDrift(series) {
   return { drift: worst, symbol }
 }
 
-/** Largest max/min price ratio across the pool's tokens, with the symbol. */
+/**
+ * Largest ONE-DAY price jump across the pool's tokens, with the symbol and date.
+ *
+ * This used to be the max/min ratio over the whole series, which cannot tell a
+ * broken feed from a bad year. Once the price range moved from ONE_YEAR to ALL
+ * the series grew to ~3.4 years and that guard started firing on real market
+ * moves: BAL ran $7.30 (Apr 2023) to $0.09 (Jun 2026), a genuine 98.8% decline,
+ * and got flagged as an 81x "broken feed" — on a $4.5M pool.
+ *
+ * A rescaling or decimals bug is a STEP; a bear market is a SLOPE. Measuring the
+ * largest single-day move separates them cleanly:
+ *     BAL   whole-life 81.1x  ->  worst day 1.64x   (benign)
+ *     WETH  whole-life  3.4x  ->  worst day 1.21x   (benign)
+ *     USDC on Polygon    inf  ->  worst day  101x   (broken, 2023-03-21)
+ * It is also immune to the zero-price case that made the old ratio Infinity for
+ * any token that ever printed 0.
+ */
 function priceDrift(series) {
-  if (!series.length) return { ratio: 1, symbol: null }
+  if (series.length < 2) return { ratio: 1, symbol: null, day: null }
   const n = series[0].prices.length
   let ratio = 1
   let symbol = null
+  let day = null
   for (let i = 0; i < n; i++) {
-    let lo = Infinity
-    let hi = 0
-    for (const p of series) {
-      const v = p.prices[i]
-      if (v < lo) lo = v
-      if (v > hi) hi = v
-    }
-    if (lo > 0 && hi / lo > ratio) {
-      ratio = hi / lo
-      symbol = series[0].symbols[i]
+    for (let k = 1; k < series.length; k++) {
+      const a = series[k - 1].prices[i]
+      const b = series[k].prices[i]
+      if (!(a > 0) || !(b > 0)) continue
+      const r = Math.max(b / a, a / b)
+      if (r > ratio) {
+        ratio = r
+        symbol = series[0].symbols[i]
+        day = series[k].day
+      }
     }
   }
-  return { ratio, symbol }
+  return { ratio, symbol, day }
 }
 
 const started = Date.now()
@@ -156,10 +195,16 @@ console.log(`  excluded: ${blacklistedCount} blacklisted by Balancer · chains $
 
 let done = 0
 const results = await scanPools(pools, {
-  // Same price range the single-pool detail view uses, so a row in the table
-  // and the chart you get by clicking it are computed from identical inputs.
-  range: 'ONE_YEAR',
-  concurrency: 3,
+  // Range deliberately left to the PRICE_RANGE default in balancer.js — the
+  // detail view uses that same constant, so a row in the table and the chart
+  // you get by clicking it cannot be computed over different spans. Naming the
+  // range here once let the two drift apart.
+  // Dropped from 3 to 2. Throttling here does not announce itself as an error —
+  // the API returns 200 with an empty snapshot list — so the cost of pushing
+  // too hard was pools silently vanishing from the table rather than a visible
+  // failure. fetchSnapshots now retries an empty response, and this makes it
+  // need to less often. Slower, and the run is in CI overnight anyway.
+  concurrency: 2,
   priceConcurrency: 2,
   onResult: () => {
     done++
@@ -168,10 +213,21 @@ const results = await scanPools(pools, {
 })
 
 const rows = []
-const skipped = { error: 0, thin: 0, unreliable: 0 }
+// `empty` is tracked apart from `thin` on purpose. A rate-limited request does
+// not always throw: the API can answer with no snapshots at all, which lands
+// here as a pool with zero rows and looks identical to a pool that is genuinely
+// two days old. Filing both under "too little history" hid a throttled scan
+// completely — the failure ceiling below only counted `error`, so a run that
+// quietly lost 30 pools to 429s still published.
+const skipped = { error: 0, empty: 0, thin: 0, unreliable: 0 }
+// Identities, not just counts. "38 pools returned nothing" is unactionable;
+// knowing WHICH pools, on which chains, is what tells you whether the cause is
+// load or something structural about those pools.
+const lost = { error: [], empty: [] }
 for (const r of results) {
   const { pool } = r
-  if (r.error) { skipped.error++; continue }
+  if (r.error) { skipped.error++; lost.error.push(`${pool.label || pool.name} (${pool.chain}, v${pool.protocolVersion}) — ${r.error}`); continue }
+  if (!r.rows.length) { skipped.empty++; lost.empty.push(`${pool.label || pool.name} (${pool.chain}, v${pool.protocolVersion}, $${Math.round(pool.tvl).toLocaleString()}) id=${pool.id?.slice(0, 18)}`); continue }
   const series = normalizeSeries(r.rows)
   if (series.length < 2) { skipped.thin++; continue }
 
@@ -190,6 +246,11 @@ for (const r of results) {
           boost: +c.boostPct.toFixed(3),
           fees: +c.feePct.toFixed(3),
           drag: +c.dragPct.toFixed(3),
+          // The drag has to follow the basis the reader picked. Publishing only
+          // the vault-token drag while the gap column switched to underlying
+          // made the table contradict its own "IL drag = gap minus fees" note
+          // on 128 rows, several with a sign flip.
+          dragU: +c.dragUnderPct.toFixed(3),
           entry: c.entryDate,
           days: c.availDays,
           // Annualised out/under-performance vs holding, compounded:
@@ -203,12 +264,25 @@ for (const r of results) {
   // --- trust flags (see the block comment above) ---
   const flags = []
   const recon = reconcile(series)
-  if (recon.coverage >= RECON_MIN_COVERAGE && recon.pass < RECON_MIN_PASS) {
+  // Two distinct failures, and the second one used to pass silently: a pool
+  // whose snapshots carry no totalLiquidity at all had coverage 0, skipped the
+  // condition entirely, and came out unflagged — the reconciliation guard
+  // treating "nothing to check" as "checked and fine". Absence of evidence is
+  // not evidence of agreement.
+  if (recon.coverage < RECON_MIN_COVERAGE) {
+    flags.push(`only ${(recon.coverage * 100).toFixed(0)}% of days could be checked against the API's own TVL, so this valuation is largely unverified`)
+  } else if (recon.pass < RECON_MIN_PASS) {
     flags.push(`our valuation disagrees with the API's own TVL on ${((1 - recon.pass) * 100).toFixed(0)}% of days (worst ${(recon.worst * 100).toFixed(0)}%)`)
+  }
+  // An UNDERLYING figure built mostly from wrapped-price substitutions is the
+  // vault-token number under an "Underlying" heading. Say so rather than let
+  // the basis toggle quietly return the same value twice.
+  if (r.underFallbackRate > 0.2) {
+    flags.push(`no underlying price feed on ${(r.underFallbackRate * 100).toFixed(0)}% of days — the "vs underlying" figure falls back to the wrapped price and is not a true underlying comparison`)
   }
   const drift = priceDrift(series)
   if (drift.ratio > PRICE_DRIFT_MAX) {
-    flags.push(`${drift.symbol} price moved ${drift.ratio.toFixed(0)}x over the window — likely a rescaled or broken feed rather than a market move`)
+    flags.push(`${drift.symbol} price jumped ${drift.ratio.toFixed(0)}x in a single day on ${drift.day} — a step that size is a rescaled or broken feed, not a market move`)
   }
   if (pool.type === 'STABLE') {
     const sr = stableRatioDrift(series)
@@ -216,7 +290,14 @@ for (const r of results) {
       flags.push(`this is a stable pool, yet ${sr.symbol} drifted ${sr.drift.toFixed(1)}x against its pair — the price feed is not trustworthy here`)
     }
   }
-  const biggest = Math.max(...WINDOWS.map((w) => Math.abs(s.byWindow[w]?.gapFinal ?? 0)))
+  // `full` is included deliberately: it is the ONLY populated column for a pool
+  // too young for 30D, so checking just the fixed windows exempted exactly the
+  // young pools this dashboard exists to show. Both bases are checked, since a
+  // boosted pool can be sane on one and absurd on the other.
+  const magnitudes = [...WINDOWS.map((w) => s.byWindow[w]), s.full].flatMap((c) =>
+    c ? [Math.abs(c.gapFinal), Math.abs(c.gapUnderFinal)] : []
+  )
+  const biggest = magnitudes.length ? Math.max(...magnitudes) : 0
   if (biggest > GAP_ABS_MAX) {
     flags.push(`|LP − HODL| reaches ${biggest.toFixed(0)}%, too extreme to take at face value`)
   }
@@ -274,7 +355,36 @@ if (leaked.length) {
     `\nABORT: ${leaked.length} rows end on the incomplete day ${today} ` +
       `(e.g. ${leaked[0].label}). The table and the live detail view would disagree.`
   )
-  process.exit(1)
+  // Exit 3, not 1: CI distinguishes "this script refuses to publish" from an
+  // ordinary network failure, and only the latter is allowed to fall back to
+  // the committed scan.json and still go green.
+  process.exit(3)
+}
+
+// A scan that lost a third of its pools to 429s produced a table that looked
+// exactly like a complete one — the per-pool failures were tallied into
+// `counts` and nothing read them. Refuse to publish a visibly truncated run,
+// because "fewer pools than usual" is invisible to a reader who has no
+// baseline to compare against.
+// Counts BOTH hard errors and pools that came back with nothing: under
+// throttling the API answers "no snapshots" far more often than it errors, so a
+// ceiling on errors alone would miss exactly the failure it exists to catch.
+const FETCH_FAIL_MAX = 0.1
+const lostToFetch = skipped.error + skipped.empty
+const failRate = pools.length ? lostToFetch / pools.length : 0
+if (lostToFetch) {
+  console.log(`\n${lostToFetch} pools produced no usable series:`)
+  for (const l of lost.error) console.log(`  ERROR  ${l}`)
+  for (const l of lost.empty) console.log(`  EMPTY  ${l}`)
+}
+if (failRate > FETCH_FAIL_MAX) {
+  console.error(
+    `\nABORT: ${lostToFetch}/${pools.length} pools (${(failRate * 100).toFixed(0)}%) returned an error ` +
+      `or no data at all (${skipped.error} errors, ${skipped.empty} empty) — over the ` +
+      `${(FETCH_FAIL_MAX * 100).toFixed(0)}% ceiling. This is a rate-limited or partial scan; ` +
+      `publishing it would silently drop pools from the table.`
+  )
+  process.exit(3)
 }
 
 const out = {

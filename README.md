@@ -89,14 +89,17 @@ to the power of ~50 produces confident-looking nonsense. It is a realised rate, 
 ### Trust guard: TVL reconciliation
 
 Every pool's reconstructed TVL (Σ reserve×price) is checked against the API's own reported TVL
-day by day. A pool is dropped unless ≥95% of its days agree within 5% **and** at least half its
-days are verifiable at all.
+day by day. A pool is **flagged** — kept, but hidden behind the `SHOW` filter and labelled with
+the reason — when fewer than **80%** of its checkable days agree within **5%**. Flagged pools are
+not dropped; they are shown with a warning on the row and on the detail page, because a suspect
+number a reader can inspect beats a silently missing one.
 
-That second clause matters: a $260M stable pool reported a nonsensical **−272% / −1423%**
-because one token's price feed drifted 373× across the window — and it slipped through an
-earlier version of this check, since `totalLiquidity` was missing from every one of its
-snapshots and a guard that only tested days with data had nothing to compare. Absence of
-evidence is not a pass; the check fails closed.
+Coverage is a separate flag, not a precondition. A pool whose snapshots carry no `totalLiquidity`
+at all has nothing to reconcile, and an earlier version of this guard let exactly that case
+through unflagged — a $260M stable pool reported a nonsensical **−272% / −1423%** because one
+token's price feed drifted 373× across the window, with `totalLiquidity` missing from every
+snapshot so the check had nothing to compare. It now flags **"largely unverified"** whenever
+under half the days are checkable. Absence of evidence is not evidence of agreement.
 
 ## Method
 
@@ -108,7 +111,39 @@ evidence is not a pass; the check fails closed.
 - **HODL leg** — the deposited basket. At the window's entry day the composition per share is
   `(amountᵢ/bpt)` for every token; it's held forward and marked with the *same* daily prices.
 - Both legs are indexed to 100 at entry, so the gap between them is the LP's fee-minus-LVR result.
-- Days without a snapshot mean no pool activity; reserves and supply are forward-filled exactly.
+- **Fee return** — `Σₜ (fees24hₜ / bptₜ) / vps₀`, the sum of each day's fees *per share*, in the
+  same units as the gap. Not `Σfees / mean(TVL)`, which is a TVL-*weighted* mean of daily yield
+  and agrees with the truth only when daily fee yield happens to be constant. A pool earning
+  $500/day that takes a 10× deposit bringing no extra volume reported **1.92%** where the answer
+  is **2.47%** — and since drag = gap − fees, every point lost there was silently reattributed to
+  "impermanent loss / LVR". The entry day's `fees24h` is excluded: it accrued in the 24h *before*
+  entry. These fees are **gross** of the protocol/creator skim while the LP leg is already net of
+  it, so the drag reads slightly more negative than pure divergence.
+- Days without a snapshot mean no pool activity; reserves and supply are forward-filled exactly —
+  but `fees24h` is **not**, because it is a flow rather than state. Carrying it forward re-counted
+  the same income once per gap day.
+- **Prices use the `ONE_YEAR` range, deliberately, not `ALL`.** `ALL` looks better on every
+  surface measurement — back to 2023 rather than 12 months, exactly one point per day at 00:00 UTC
+  (matching how snapshots are stamped) instead of ~7.4 intraday ticks, smaller and faster. It is
+  also **unusable**: it rounds prices to two decimal places.
+
+  | token | `ALL` | `ONE_YEAR` |
+  |---|---|---|
+  | SHIB | **0** (all 1,245 points) | 0.00000492 |
+  | BAL | **0.12** | 0.114176 — a 5.1% error |
+  | WETH | 1868 | 1909.11 |
+
+  Every token under half a cent comes back as zero, and `buildRows` needs a positive price per
+  token, so those pools produce no rows and disappear from the table — 38 of 527 did. Every other
+  low-priced token is quantised, corrupting value-per-share wherever it is held. A run on `ALL`
+  put 191 pools into TVL-reconciliation failure; that was this, not the longer history it first
+  looked like.
+
+  The cost of `ONE_YEAR` is stated rather than hidden: the series cannot exceed ~365 days, so the
+  column is labelled **FULL ≤1Y** — for a pool older than a year it is the last 12 months, not a
+  lifetime, which is true of roughly half the table. Days are bucketed last-write-wins across the
+  intraday ticks, which for a *completed* day is consistently its final tick (a stable daily
+  close); the in-progress day, where that genuinely was unstable, is dropped.
 - A trailing run of ≥10 days without trading is trimmed. "No trading" is detected on per-share
   composition (`res/bpt`): proportional add/remove — the only liquidity ops reCLAMM allows,
   including post-suspension exits — leaves it unchanged, while any swap shifts it. A frozen pool
@@ -151,10 +186,20 @@ depends on which counterfactual you mean. The **VS** filter switches between the
 - **UNDERLYING** — hold the plain `USDC` you actually deposited. Nobody's real alternative is
   holding an aToken, and idle USDC earns nothing, so here the boost counts **for** the LP.
 
-This is not cosmetic. Over 90 days, **16 of 79** live pools flip from "LP lost" to "LP won" purely
-by changing basis — including a $7M pool going −0.12% → +0.52%. The difference between the two
+This is not cosmetic. **108 pool/window pairs in the current data disagree on the sign** — the two
+bases reach opposite conclusions about whether LPing beat holding. The difference between the two
 figures is exactly the wrapper's accrued yield over the window, and the pool detail page draws
 both HODL legs so you can see it.
+
+Because the choice changes the answer, it is owned by the page rather than by the table: the
+selection follows you into the detail view, the headline card names which basis it is showing,
+and the IL DRAG column switches with it. Previously the toggle lived inside the table component,
+so navigating to a pool reset it to POOL TOKENS and the detail page's verdict silently contradicted
+the row that had been clicked.
+
+Where a wrapper has no underlying price feed, the "underlying" leg falls back to the wrapped
+price — which would return the pool-token number under an underlying label. Pools where that
+happens on more than 20% of days are flagged rather than quietly answered.
 
 Conversion uses the **ratio of the two USD price series**, not the API's `priceRate` field: rate
 providers can fold in more than the wrapper rate. `waBasEURC` reports `priceRate` 1.1753 while its

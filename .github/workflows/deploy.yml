@@ -24,7 +24,10 @@ concurrency:
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Lower concurrency plus empty-response retries pushed the scan past the old
+    # 45 minute budget. It runs overnight; give it room rather than have a slow
+    # night truncate the table.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -35,12 +38,37 @@ jobs:
 
       - run: npm ci
 
-      # Polite, low-concurrency scan with 429 backoff — takes ~10-15 min.
+      # Polite, low-concurrency scan with 429 backoff — takes ~25 min.
       # If it fails we keep the scan.json already committed in the repo rather
-      # than shipping an empty table.
+      # than shipping an empty table. That fallback is deliberate, but it used
+      # to be indistinguishable from success: continue-on-error turned every
+      # failure into a green build quietly serving stale numbers, including the
+      # integrity abort the scan raises on purpose. The exit code is captured
+      # instead so the two cases can be told apart without re-running a 25
+      # minute scan.
       - name: Refresh scan data
-        run: npm run scan
-        continue-on-error: true
+        id: scan
+        run: |
+          set +e
+          npm run scan
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      # Exit 3 is scan.mjs refusing to publish data it knows is wrong. That is a
+      # bug to fix, not weather to wait out, so it must not deploy.
+      - name: Refuse to deploy on an integrity abort
+        if: steps.scan.outputs.code == '3'
+        run: |
+          echo "::error::Scan aborted on an integrity check. Refusing to publish."
+          exit 1
+
+      # Any other non-zero is a network/rate-limit failure: fall back to the
+      # committed scan.json, but say so loudly and name its age.
+      - name: Warn that this deploy is serving stale data
+        if: steps.scan.outputs.code != '0' && steps.scan.outputs.code != '3'
+        run: |
+          gen=$(node -p "JSON.parse(require('fs').readFileSync('public/scan.json','utf8')).generatedAt")
+          echo "::warning::Scan failed (exit ${{ steps.scan.outputs.code }}). Deploying committed scan.json from $gen."
 
       - run: npm run build
 

@@ -32,7 +32,12 @@ const SHOW_MODES = [
 
 const WIN_COLS = [30, 90, 180, 'full']
 const winKey = (w) => (w === 'full' ? 'wfull' : 'w' + w)
-const winLabel = (w) => (w === 'full' ? 'FULL' : w + 'D')
+// "FULL ≤1Y" rather than "FULL": the series can never be longer than the price
+// history fetched, which tops out around 365 days, so for a pool older than a
+// year this column is the last 12 months and not its lifetime. Roughly half the
+// table is in that position, and the bare word FULL invited readers to compare
+// a 3-year pool's "lifetime" against a 2-month pool's.
+const winLabel = (w) => (w === 'full' ? 'FULL ≤1Y' : w + 'D')
 
 // What the LP is measured against. For a boosted pool these differ, and can
 // disagree on the sign — see the footnote in the table.
@@ -51,6 +56,10 @@ const BASES = [
 const gapOf = (c, basis) => (c ? (basis === 'UNDERLYING' ? c.gapU ?? c.gap : c.gap) : null)
 const aprOf = (c, basis) => (c ? (basis === 'UNDERLYING' ? c.aprU ?? c.apr : c.apr) : null)
 const hodlOf = (c, basis) => (basis === 'UNDERLYING' ? c.hodlU ?? c.hodl : c.hodl)
+// The drag must switch with the basis for the same reason the gap does — the
+// footnote tells the reader drag = gap − fees, and on the underlying basis a
+// vault-token drag broke that identity on 128 rows.
+const dragOf = (c, basis) => (c ? (basis === 'UNDERLYING' ? c.dragU ?? c.drag : c.drag) : null)
 
 // Colour ramp for the LP−HODL cells: neutral near zero, deepening toward the
 // extremes so the eye lands on the pools that actually diverged.
@@ -75,13 +84,15 @@ const COLS = [
     align: 'right',
     title:
       w === 'full'
-        ? 'LP − HODL over the pool’s whole life. Always populated, so young pools still say something.'
-        : `LP − HODL over the last ${w} days`,
+        ? 'LP − HODL over all the history available, which the price feed caps at ~365 days. For a pool younger than that it is the whole life; for an older one it is the last 12 months, NOT lifetime. Always populated, so young pools still say something. Hover a cell for its exact entry date and day count.'
+        : `LP − HODL over the last ${w} days. A pool with at least 80% of that history is included, so this can be as short as ${Math.round(w * 0.8)} days — hover a cell for its exact entry date and day count.`,
   })),
   { key: 'apr', label: 'APR', align: 'right', title: 'Annualised out/under-performance vs holding: (LP/HODL)^(365/days) − 1, from the longest window with at least 14 days. A realised rate, not a forecast.' },
-  { key: 'fees', label: 'FEES', align: 'right', title: 'Swap fees earned over the longest available window, as % of average TVL' },
-  { key: 'drag', label: 'IL DRAG', align: 'right', title: 'Gap minus fees ≈ the impermanent-loss / LVR component' },
-  { key: 'yield', label: 'YIELD', align: 'right', title: 'Underlying yield-bearing APR. Both the LP and a holder earn this, so it cancels out of LP − HODL.' },
+  { key: 'fees', label: 'FEES', align: 'right', title: 'Swap fees earned over the longest available window, as % of entry capital — the sum of each day’s fees per share. Gross: the protocol/creator skim is already out of the LP’s value-per-share but is still counted here.' },
+  { key: 'drag', label: 'IL DRAG', align: 'right', title: 'Gap minus fees ≈ the divergence (impermanent-loss / LVR) component, on whichever basis is selected above. Slightly overstated, since the fees subtracted are gross of the protocol skim.' },
+  // Whether the yield cancels depends entirely on the selected basis, so the
+  // tooltip cannot state one answer unconditionally.
+  { key: 'yield', label: 'YIELD', align: 'right', title: 'Underlying yield-bearing APR. On the VAULT TOKEN basis both the LP and the holder earn it, so it cancels out of LP − HODL. On the UNDERLYING basis the holder does not earn it, so it counts in the LP’s favour.' },
 ]
 
 // The window whose fees / drag we show: the longest one this pool supports.
@@ -111,7 +122,8 @@ function toCsv(rows) {
     'pool', 'address', 'chain', 'type', 'tvl_usd',
     'vs_pooltokens_30d', 'vs_pooltokens_90d', 'vs_pooltokens_180d', 'vs_pooltokens_full',
     'vs_underlying_30d', 'vs_underlying_90d', 'vs_underlying_180d', 'vs_underlying_full',
-    'fees_pct_tvl', 'il_drag_pct', 'underlying_yield_apr', 'incentive_apr',
+    'fees_pct_entry_capital', 'il_drag_vs_pooltokens', 'il_drag_vs_underlying',
+    'underlying_yield_apr', 'incentive_apr',
     'live', 'last_day', 'days_of_history', 'flags',
   ]
   const esc = (v) => {
@@ -124,21 +136,25 @@ function toCsv(rows) {
       r.label, r.address, r.chain, TYPE_LABEL[r.type] || r.type, r.tvl,
       r.win[30]?.gap ?? '', r.win[90]?.gap ?? '', r.win[180]?.gap ?? '', r.win.full?.gap ?? '',
       r.win[30]?.gapU ?? '', r.win[90]?.gapU ?? '', r.win[180]?.gapU ?? '', r.win.full?.gapU ?? '',
-      bw?.fees ?? '', bw?.drag ?? '', r.yieldApr ?? '', r.incentiveApr ?? '',
+      bw?.fees ?? '', bw?.drag ?? '', bw?.dragU ?? bw?.drag ?? '',
+      r.yieldApr ?? '', r.incentiveApr ?? '',
       r.live, r.lastDay ?? '', r.maxWin ?? '', (r.flags || []).join(' | '),
     ].map(esc).join(',')
   })
   return [head.join(','), ...lines].join('\n')
 }
 
-export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCount, excludedChains }) {
+// `basis` is owned by App, not by this component: it drives the detail view's
+// headline number too, and while it lived here every navigation unmounted the
+// table and silently reset it to WRAPPED — so the reader came back to different
+// numbers than they left.
+export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCount, excludedChains, onRefresh, refreshing, basis, setBasis, counts, minTvlFloor = 1000 }) {
   const [sort, setSort] = useState({ key: 'tvl', dir: 'desc' })
   const [query, setQuery] = useState('')
   const [minTvl, setMinTvl] = useState(0)
   const [chain, setChain] = useState('ALL')
   const [type, setType] = useState('ALL')
   const [show, setShow] = useState('LIVE')
-  const [basis, setBasis] = useState('WRAPPED')
 
   // Only offer values that actually exist, with counts — AutoRange pools are
   // small and new, so a TVL sort buries them; this is how you find them.
@@ -163,7 +179,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
   // because a default filter excluded it. Typing a query therefore lifts the
   // SHOW filter — an idle or flagged row still arrives carrying its badge, so
   // nothing is silently misrepresented, it is simply findable.
-  const { filtered, hiddenByFilters } = useMemo(() => {
+  const { filtered, hiddenByFilters, hiddenByShow } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const allowed = (r) => {
       if (q) return true
@@ -184,7 +200,11 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         (type === 'ALL' || r.type === type) &&
         r.tvl >= minTvl
     )
-    return { filtered: out, hiddenByFilters: eligible.length - out.length }
+    // Counted separately from hiddenByFilters so the footnote can state what
+    // the SHOW dropdown is removing. Its default (LIVE) hides idle and flagged
+    // pools, which is right, but it was doing so without ever saying how many.
+    const hiddenByShow = rows.filter((r) => matchesQuery(r, q)).length - eligible.length
+    return { filtered: out, hiddenByFilters: eligible.length - out.length, hiddenByShow }
   }, [rows, query, minTvl, chain, type, show])
 
   const sorted = useMemo(() => {
@@ -210,8 +230,13 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         : { key, dir: ['label', 'chain', 'type'].includes(key) ? 'asc' : 'desc' }
     )
 
-  const scored = sorted.filter((r) => bestWindow(r))
-  const beat = scored.filter((r) => gapOf(bestWindow(r), basis) > 0).length
+  // One stated horizon, so the tally means something. Mixing each pool's
+  // longest available window made "150/281" a count over 281 different
+  // questions.
+  const beat90 = useMemo(() => {
+    const withWin = sorted.filter((r) => r.win[90])
+    return { n: withWin.filter((r) => gapOf(r.win[90], basis) > 0).length, total: withWin.length }
+  }, [sorted, basis])
   const totalTvl = sorted.reduce((a, r) => a + r.tvl, 0)
 
   function downloadCsv() {
@@ -247,18 +272,25 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
       <div className="statstrip">
         <div><span className="sl">POOLS</span><span className="sv">{sorted.length}</span></div>
         <div><span className="sl">TOTAL TVL</span><span className="sv">{fmtUsd(totalTvl)}</span></div>
-        <div>
-          <span className="sl">LP BEAT {basis === 'UNDERLYING' ? 'UNDERLYING' : 'VAULT TOKEN'}</span>
+        {/* Both cards state their window and their row set. LP BEAT used to
+            count each pool over whatever its longest window happened to be —
+            180 days for one row, under 14 for the next — and present the tally
+            as if it were one comparison. It is now a single stated horizon. */}
+        <div title={`Pools whose 90-day LP − HODL is positive, vs ${basis === 'UNDERLYING' ? 'holding the underlying' : 'holding the vault token'}. Counted over the ${sorted.length} rows currently shown, of which ${beat90.total} have 90 days of history.`}>
+          <span className="sl">LP BEAT {basis === 'UNDERLYING' ? 'UNDERLYING' : 'VAULT TOKEN'} · 90D</span>
           <span className="sv" style={{ color: 'var(--green)' }}>
-            {beat}<span className="sv-sub">/{scored.length}</span>
+            {beat90.n}<span className="sv-sub">/{beat90.total} shown</span>
           </span>
         </div>
-        <div>
+        <div title={`Median of the 90-day LP − HODL across the ${beat90.total} shown pools that have 90 days of history.`}>
           <span className="sl">MEDIAN 90D</span>
           <span className="sv">{(() => {
             const g = sorted.map((r) => gapOf(r.win[90], basis)).filter((v) => v != null).sort((a, b) => a - b)
             if (!g.length) return '—'
-            const m = g[Math.floor(g.length / 2)]
+            // Mean of the two middle values on an even count, rather than
+            // silently picking the upper one.
+            const mid = g.length >> 1
+            const m = g.length % 2 ? g[mid] : (g[mid - 1] + g[mid]) / 2
             return <span style={{ color: m >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtPct(m)}</span>
           })()}</span>
         </div>
@@ -311,6 +343,16 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
           </select>
         </span>
         <button className="fbtn" onClick={downloadCsv} disabled={!sorted.length}>[ CSV ]</button>
+        {onRefresh && (
+          <button
+            className="fbtn refresh"
+            onClick={onRefresh}
+            disabled={refreshing}
+            title="Re-read scan.json, bypassing the browser cache. The table is rebuilt nightly by CI — this picks up the newest build rather than rescanning every pool live, which takes ~25 minutes."
+          >
+            {refreshing ? '[ REFRESHING… ]' : '[ REFRESH ]'}
+          </button>
+        )}
         {(query || chain !== 'ALL' || type !== 'ALL' || minTvl || show !== 'LIVE') && (
           <button
             className="fbtn"
@@ -351,8 +393,20 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
           <tbody>
             {sorted.map((r) => {
               const bw = bestWindow(r)
+              // Rows are the only route to a pool's chart, so they have to be
+              // reachable without a mouse.
               return (
-                <tr key={`${r.chain}:${r.address}`} onClick={() => onSelect(r)} title="Open the full chart for this pool">
+                <tr
+                  key={`${r.chain}:${r.address}`}
+                  onClick={() => onSelect(r)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(r) }
+                  }}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Open the full chart for ${r.label} on ${chainShort(r.chain)}`}
+                  title="Open the full chart for this pool"
+                >
                   <td className="pool">
                     <span className="plabel">{r.label}</span>
                     {r.nTokens > 2 && <span className="mini">{r.nTokens}t</span>}
@@ -393,6 +447,14 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
                               + (c.boost ? ` · boost over this window ${(c.boost >= 0 ? '+' : '') + c.boost.toFixed(2)}%` : '')
                             : `Only ${r.maxWin}d of history`}>
                         {g != null ? fmtPct(g, 2) : <span className="dim">—</span>}
+                        {/* A pool needs only 80% of a window to be admitted to
+                            its column, so a "30D" cell can hold 25 days. Say so
+                            on the cell face rather than only on hover. */}
+                        {c && w !== 'full' && c.days < w - 1 && (
+                          <span className="shortwin" title={`only ${c.days} days of history — not a full ${w}-day window`}>
+                            {' '}{c.days}d
+                          </span>
+                        )}
                       </td>
                     )
                   })}
@@ -400,11 +462,11 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
                       title={bw ? `annualised from the ${bestWindowDays(r)}-day window` : ''}>
                     {aprOf(bw, basis) != null ? fmtPct(aprOf(bw, basis), 1) : <span className="dim" title="needs at least 14 days of history">—</span>}
                   </td>
-                  <td className="r num dimtext" title={bw ? `swap fees over ${bestWindowDays(r)} days, as % of average TVL` : ''}>
+                  <td className="r num dimtext" title={bw ? `swap fees over ${bestWindowDays(r)} days, as % of entry capital` : ''}>
                     {bw ? bw.fees.toFixed(2) + '%' : <span className="dim">—</span>}
                   </td>
-                  <td className="r num dimtext" title={bw ? `gap minus fees over ${bestWindowDays(r)} days` : ''}>
-                    {bw ? fmtPct(bw.drag, 2) : <span className="dim">—</span>}
+                  <td className="r num dimtext" title={bw ? `gap minus fees over ${bestWindowDays(r)} days, vs ${basis === 'UNDERLYING' ? 'the underlying' : 'the vault token'}` : ''}>
+                    {bw ? fmtPct(dragOf(bw, basis), 2) : <span className="dim">—</span>}
                   </td>
                   <td className="r num dimtext">
                     {r.yieldApr > 0 ? (r.yieldApr * 100).toFixed(2) + '%' : <span className="dim">—</span>}
@@ -429,10 +491,13 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         <b>Reading this table:</b> every number is <b>LP minus HODL</b> — the extra (or missing) value
         from providing liquidity versus simply holding the same basket of tokens you would have
         deposited. Negative means holding won. <b>Fees</b> is what the pool earned in swap fees over
-        the window (% of average TVL) and <b>IL drag</b> is the gap minus those fees — roughly the
-        impermanent-loss / LVR cost. <b>Yield</b> is the underlying yield-bearing APR: an LP and a
+        the window, as a % of entry capital — the sum of each day's fees per share — and{' '}
+        <b>IL drag</b> is the gap minus those fees, on the basis you have selected, which is
+        roughly the impermanent-loss / LVR cost. Those fees are gross of the protocol/creator
+        skim while the gap is already net of it, so the drag reads a little more negative than
+        pure divergence. <b>Yield</b> is the underlying yield-bearing APR: an LP and a
         holder both earn it — so on the <b>vault token</b> basis it cancels out and can never make
-        LPing win on its own. Switch <b>VS</b> to <b>UNDERLYING</b> to compare against the plain
+        LPing win on its own; on the <b>underlying</b> basis it does not cancel and counts for the LP. Switch <b>VS</b> to <b>UNDERLYING</b> to compare against the plain
         assets you actually deposited (USDC rather than waEthUSDC): a holder of those earns no
         yield, so the boost then counts in the LP's favour. For boosted pools the two bases can
         disagree on the sign, and the difference between them is exactly the yield the wrapper
@@ -442,6 +507,16 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
         {' '}Pools Balancer itself blacklists are excluded
         {blacklistedCount ? ` (${blacklistedCount} of them)` : ''}
         {excludedChains?.length ? `, as are ${excludedChains.join(', ')}` : ''}.
+        {/* Coverage stated as numbers rather than implied by "every pool":
+            pools do get dropped, and a reader is entitled to know how many. */}
+        {counts && (
+          <>
+            {' '}Coverage: <b>{counts.listed}</b> pools listed above the ${(minTvlFloor / 1000).toFixed(0)}k floor,{' '}
+            <b>{counts.usable}</b> scored, <b>{counts.error + (counts.empty || 0)}</b> dropped for
+            missing price or snapshot data and <b>{counts.thin}</b> for under two days of history.
+            {hiddenByShow > 0 && <> The <b>SHOW</b> filter is currently hiding <b>{hiddenByShow}</b> idle or flagged {hiddenByShow === 1 ? 'pool' : 'pools'}.</>}
+          </>
+        )}
         {generatedAt && <> Data refreshed {String(generatedAt).slice(0, 10)}.</>}
       </p>
     </>

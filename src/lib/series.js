@@ -180,9 +180,26 @@ export function computeWindow(series, windowDays) {
 
   const lastPt = pts[pts.length - 1]
   const availDays = daysBetween(slice[0].day, end.day)
-  const feeSum = slice.reduce((a, p) => a + (p.fees || 0), 0)
-  const avgTvl = slice.reduce((a, p) => a + p.tvl, 0) / slice.length
-  const feePct = avgTvl > 0 ? (100 * feeSum) / avgTvl : 0
+
+  // Fee return in the SAME units as the gap: percent of entry capital.
+  //
+  // A day's swap fees land in the reserves, so they add fees_t/bpt_t to value
+  // per share; indexed against vps0 that is exactly the contribution to the LP
+  // leg. Summing those daily contributions is the fee return.
+  //
+  // This used to be Σfees / mean(tvl), which is a TVL-WEIGHTED mean of daily
+  // yield rather than a plain sum — the two agree only when daily fee yield is
+  // constant. Whenever TVL and volume move apart, they diverge badly: a pool
+  // earning $500/day that takes a 10x deposit which brings no extra volume
+  // reported 1.92% against a true 2.47%. Because dragPct = gap − feePct, every
+  // percentage point lost here was silently reattributed to "impermanent loss
+  // / LVR" in the IL DRAG column.
+  //
+  // slice[0].fees is excluded: fees24h on the entry snapshot accrued in the
+  // 24h BEFORE entry, so it belongs to whoever held the pool then.
+  const feePct = slice
+    .slice(1)
+    .reduce((a, p) => a + (p.bpt > 0 ? (100 * (p.fees || 0)) / p.bpt / vps0 : 0), 0)
 
   return {
     pts,
@@ -204,8 +221,15 @@ export function computeWindow(series, windowDays) {
     boostPct: lastPt.gapU - lastPt.gap,
     boosted: t0.underPrices.some((u, i) => Math.abs(u - t0.prices[i]) / (t0.prices[i] || 1) > 1e-9),
     feePct,
-    // gap minus fees ≈ the impermanent-loss / LVR component
+    // Gap minus fees ≈ the divergence (impermanent-loss / LVR) component.
+    // Note feePct is GROSS of the protocol/creator skim while the gap is already
+    // net of it, so the drag absorbs that skim and reads a little more negative
+    // than pure divergence does.
+    // Both bases are carried: the drag must follow whichever gap the reader has
+    // selected, or the stated "gap minus fees" arithmetic stops adding up — on
+    // the underlying basis it disagreed by more than 0.5pp on 128 rows.
     dragPct: lastPt.gap - feePct,
+    dragUnderPct: lastPt.gapU - feePct,
     peakTvl: Math.max(...slice.map((p) => p.tvl)),
     endTvl: end.tvl,
     availDays,

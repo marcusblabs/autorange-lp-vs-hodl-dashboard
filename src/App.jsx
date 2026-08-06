@@ -51,6 +51,12 @@ export default function App() {
   const [windowDays, setWindowDays] = useState(30)
   const [status, setStatus] = useState('idle')
   const [error, setError] = useState(null)
+  const [refreshing, setRefreshing] = useState(false)
+  // Which counterfactual the whole page is measured against. Owned here so the
+  // table and the detail view can never answer the same question differently:
+  // 108 pool/window pairs in the current data have OPPOSITE SIGNS on the two
+  // bases, and the detail view used to hardcode the vault-token one.
+  const [basis, setBasis] = useState('WRAPPED')
   const loadSeq = useRef(0)
 
   const view = target ? 'detail' : 'table'
@@ -58,22 +64,32 @@ export default function App() {
     document.body.dataset.view = view
   }, [view])
 
+  // One definition of "raw rows → the series both views chart and tabulate".
+  // Kept in a single place on purpose: the table and the chart disagreeing was
+  // exactly the bug that came from two code paths each doing this their own way.
+  const seriesFrom = (rows, throughDay) => clampToScanDay(normalizeSeries(rows), throughDay)
+
   // ---- the precomputed scan table ----
-  useEffect(() => {
-    let on = true
-    // 'no-cache' revalidates instead of serving a stale copy: the browser sends
-    // the ETag and gets a cheap 304 when nothing changed, but picks up the new
-    // file the moment CI refreshes it. Without this a returning visitor keeps
-    // whatever scan.json they cached and never sees the nightly rebuild.
-    fetch(SCAN_URL, { cache: 'no-cache' })
-      .then((r) => {
-        if (!r.ok) throw new Error(`scan.json ${r.status}`)
-        return r.json()
-      })
-      .then((d) => on && setScan(d))
-      .catch((e) => on && setScanErr(e))
-    return () => { on = false }
-  }, [])
+  // 'no-cache' revalidates instead of serving a stale copy: the browser sends
+  // the ETag and gets a cheap 304 when nothing changed, but picks up the new
+  // file the moment CI refreshes it. Without this a returning visitor keeps
+  // whatever scan.json they cached and never sees the nightly rebuild.
+  // 'reload' (the refresh button) skips even the revalidation.
+  const loadScan = async (bypassCache) => {
+    setScanErr(null)
+    try {
+      const r = await fetch(SCAN_URL, { cache: bypassCache ? 'reload' : 'no-cache' })
+      if (!r.ok) throw new Error(`scan.json ${r.status}`)
+      const d = await r.json()
+      setScan(d)
+      return d
+    } catch (e) {
+      setScanErr(e)
+      return null
+    }
+  }
+
+  useEffect(() => { loadScan(false) }, [])
 
   // ---- live per-pool detail ----
   useEffect(() => {
@@ -83,7 +99,7 @@ export default function App() {
     fetchPoolSeries(target.id || target.address, target.chain)
       .then(({ rows, meta: m }) => {
         if (seq !== loadSeq.current) return
-        const norm = clampToScanDay(normalizeSeries(rows), scan?.throughDay)
+        const norm = seriesFrom(rows, scan?.throughDay)
         if (norm.length < 2) {
           setStatus('error')
           setError(new Error('Not enough daily history for this pool yet (needs at least 2 trading days).'))
@@ -97,15 +113,53 @@ export default function App() {
       })
   }, [target, scan?.throughDay])
 
+  // Refresh has to defeat two caches, not one: the browser's copy of scan.json
+  // and the 10-minute in-page cache in balancer.js that fetchPoolSeries reads.
+  // Skipping the second would make the button look like it worked while the
+  // chart kept showing the same numbers for ten minutes.
+  //
+  // The table is reloaded first so the chart is clamped to the *new* throughDay
+  // — refreshing across a nightly rebuild would otherwise pin the fresh series
+  // back to yesterday's boundary.
+  const onRefresh = async () => {
+    setRefreshing(true)
+    const seq = ++loadSeq.current
+    try {
+      const fresh = await loadScan(true)
+      if (!target) return
+      const { rows, meta: m } = await fetchPoolSeries(target.id || target.address, target.chain, {
+        force: true,
+      })
+      if (seq !== loadSeq.current) return // user navigated away mid-refresh
+      const norm = seriesFrom(rows, (fresh || scan)?.throughDay)
+      if (norm.length < 2) throw new Error('Not enough daily history for this pool yet.')
+      setSeries(norm); setMeta(m); setStatus('ready'); setError(null)
+    } catch (e) {
+      if (seq === loadSeq.current && target) { setStatus('error'); setError(e) }
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   const maxWin = series ? maxWindowDays(series) : 0
   const live = series ? isLive(series) : false
 
+  // Clamp the look-back to what THIS pool supports, then restore it for the
+  // next one. The clamp used to be one-way: opening a two-day-old pool knocked
+  // the selection down to 1D and left it there, so every pool opened afterwards
+  // — however long its history — was silently charted over a single day until
+  // the reader noticed and clicked back up. `preferredWindow` remembers what was
+  // actually asked for; windowDays is only ever the clamped view of it.
+  const preferredWindow = useRef(30)
   useEffect(() => {
     if (!series) return
-    if (windowDays != null && !windowFits(maxWin, windowDays)) {
-      const feasible = [...WINDOWS].reverse().find((w) => windowFits(maxWin, w))
-      setWindowDays(feasible ?? null)
+    const want = preferredWindow.current
+    if (want == null || windowFits(maxWin, want)) {
+      setWindowDays(want)
+      return
     }
+    const feasible = [...WINDOWS].reverse().find((w) => windowFits(maxWin, w))
+    setWindowDays(feasible ?? null)
     // eslint-disable-next-line
   }, [series])
 
@@ -114,25 +168,42 @@ export default function App() {
     [series, windowDays]
   )
 
+  // Kept separate from scanErr. Sharing one error slot meant a typo in the
+  // paste box rendered as a table-load failure and, because the table only
+  // renders when `!scanErr`, replaced the whole table with the message.
+  const [pasteErr, setPasteErr] = useState(null)
+
   async function openPasted() {
     const m = paste.match(POOL_RE)
-    if (!m) { setScanErr(new Error('Paste a Balancer pool link or a 0x pool address.')); return }
+    if (!m) { setPasteErr(new Error('Paste a Balancer pool link or a 0x pool address.')); return }
     const addr = m[0].toLowerCase()
-    // if it's already in the scan we know the chain without a round-trip
-    const known = scan?.rows.find((r) => r.address === addr || r.id?.toLowerCase() === addr)
-    if (known) { setPaste(''); setTarget({ id: known.id, address: known.address, chain: known.chain }); return }
-    setResolving(true); setScanErr(null)
+    // If it is already in the scan we know the chain without a round-trip.
+    // Matched on id first: 7 addresses in the current scan belong to two
+    // different pools on two different chains, and an address-only match would
+    // open whichever happened to sort first.
+    const known =
+      scan?.rows.find((r) => r.id?.toLowerCase() === addr) ||
+      scan?.rows.find((r) => r.address === addr)
+    if (known) { setPaste(''); setPasteErr(null); setTarget({ id: known.id, address: known.address, chain: known.chain }); return }
+    setResolving(true); setPasteErr(null)
     try {
       const r = await resolvePool(addr)
       if (!r) throw new Error('That pool was not found on any Balancer chain.')
       setPaste('')
       setTarget({ id: r.id, address: r.address || addr, chain: r.chain })
     } catch (e) {
-      setScanErr(e)
+      setPasteErr(e)
     } finally {
       setResolving(false)
     }
   }
+
+  // The scan's trust flags are the reason a row is hidden behind the SHOW filter;
+  // dropping them on the detail page meant the one screen a reader studies
+  // closely was the only one that never warned them.
+  const targetFlags = target
+    ? scan?.rows.find((r) => r.id === target.id || r.address === target.address)?.flags || []
+    : []
 
   // ------------------------------------------------------------------ table
   if (view === 'table') {
@@ -141,14 +212,14 @@ export default function App() {
         <div className="head">
           <h1>
             LP vs HODL
-            <span className="tag">Balancer v1 · v2 · v3 — every pool, every chain</span>
+            <span className="tag">Balancer v1 · v2 · v3 — every chain, every pool above $1k</span>
           </h1>
           <p>
-            For every Balancer pool — v1, v2 and v3, on every chain: would you have more value{' '}
-            <b>providing liquidity</b> or just <b>holding the tokens</b> you would have deposited?
-            Each number is the pool’s value-per-share — which already nets swap fees, impermanent
-            loss and the LVR paid to arbitrageurs — measured against that same basket simply held.
-            Sort, filter, or click a row for the full chart.
+            For every Balancer pool above <b>$1k TVL</b> — v1, v2 and v3, on every chain: would you
+            have more value <b>providing liquidity</b> or just <b>holding the tokens</b> you would
+            have deposited? Each number is the pool’s value-per-share — which already nets swap
+            fees, impermanent loss and the LVR paid to arbitrageurs — measured against that same
+            basket simply held. Sort, filter, or click a row for the full chart.
           </p>
         </div>
 
@@ -172,6 +243,7 @@ export default function App() {
           </span>
         </div>
 
+        {pasteErr && <div className="err">{String(pasteErr.message || pasteErr)}</div>}
         {scanErr && <div className="err">{String(scanErr.message || scanErr)}</div>}
 
         {!scan && !scanErr && <div className="loading">Loading the pool table…</div>}
@@ -183,6 +255,12 @@ export default function App() {
             blacklistedCount={scan.blacklistedCount}
             excludedChains={scan.excludedChains}
             onSelect={(r) => setTarget({ id: r.id, address: r.address, chain: r.chain })}
+            onRefresh={onRefresh}
+            refreshing={refreshing}
+            basis={basis}
+            setBasis={setBasis}
+            counts={scan.counts}
+            minTvlFloor={scan.minTvl}
           />
         )}
       </>
@@ -219,15 +297,45 @@ export default function App() {
                 key={w}
                 className={windowDays === w ? 'on' : ''}
                 disabled={!windowFits(maxWin, w)}
-                onClick={() => setWindowDays(w)}
+                onClick={() => { preferredWindow.current = w; setWindowDays(w) }}
               >
                 {WIN_LABEL[w]}
               </button>
             ))}
-            <button className={windowDays == null ? 'on' : ''} onClick={() => setWindowDays(null)}>
+            <button
+              className={windowDays == null ? 'on' : ''}
+              onClick={() => { preferredWindow.current = null; setWindowDays(null) }}
+            >
               Full
             </button>
           </div>
+        </div>
+        {/* Same control as the table's, so the basis can be changed without
+            navigating back — and so this page never silently answers a
+            different question than the one the table was set to. */}
+        {win?.boosted && (
+          <div className="field">
+            <label>VS</label>
+            <div className="seg">
+              <button className={basis === 'WRAPPED' ? 'on' : ''} onClick={() => setBasis('WRAPPED')}>
+                Vault token
+              </button>
+              <button className={basis === 'UNDERLYING' ? 'on' : ''} onClick={() => setBasis('UNDERLYING')}>
+                Underlying
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="field">
+          <label>Data</label>
+          <button
+            className="fbtn refresh"
+            onClick={onRefresh}
+            disabled={refreshing || status === 'loading'}
+            title="Re-read this pool's snapshots and prices from the Balancer API, bypassing the 10-minute in-page cache. The series still ends on the last completed UTC day."
+          >
+            {refreshing ? '[ REFRESHING… ]' : '[ REFRESH ]'}
+          </button>
         </div>
       </div>
 
@@ -236,6 +344,19 @@ export default function App() {
 
       {win && (
         <>
+          {/* The scan hides flagged pools behind a filter and explains why on the
+              row. Reaching the same pool by clicking through or by pasting a link
+              used to bypass that warning entirely. */}
+          {targetFlags.length > 0 && (
+            <div className="note warn">
+              <b>⚑ Treat these numbers with suspicion.</b>{' '}
+              {targetFlags.length === 1 ? targetFlags[0] : (
+                <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                  {targetFlags.map((f) => <li key={f}>{f}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
           {win.clamped && (
             <div className="note">
               Only <b>{win.availDays} days</b> of history exist for this pool — showing the full
@@ -250,12 +371,13 @@ export default function App() {
             </div>
           )}
 
-          <StatCards win={win} />
+          <StatCards win={win} basis={basis} />
 
           {win.boosted && (
             <div className="note">
-              <b>Boosted pool.</b> Against the wrapped tokens the pool holds, the LP is{' '}
-              <b>{win.gapFinal >= 0 ? '+' : ''}{win.gapFinal.toFixed(2)}%</b> — that comparison
+              <b>Boosted pool — two honest answers.</b> Against the wrapped tokens the pool holds,
+              the LP is{' '}
+              <b>{win.gapFinal >= 0 ? '+' : ''}{win.gapFinal.toFixed(2)}%</b>; that comparison
               cancels the yield out, so it measures the AMM alone. Against the{' '}
               <b>underlying assets you would actually have deposited</b> (which earn nothing sitting
               in a wallet) it is{' '}
@@ -265,7 +387,13 @@ export default function App() {
               . The{' '}
               {/* derive from the rounded figures shown above so the arithmetic reads consistently */}
               {Math.abs(+win.gapUnderFinal.toFixed(2) - +win.gapFinal.toFixed(2)).toFixed(2)}%
-              {' '}difference is the wrapper's accrued yield over this window.
+              {' '}difference is the wrapper's accrued yield over this window. The cards above show
+              the <b>{basis === 'UNDERLYING' ? 'underlying' : 'vault token'}</b> comparison — switch
+              it with <b>VS</b> in the controls.
+              {Math.sign(win.gapFinal) !== Math.sign(win.gapUnderFinal) && (
+                <> <b style={{ color: 'var(--amber)' }}>The two disagree on the sign here</b>, so
+                which one you want is the whole question.</>
+              )}
             </div>
           )}
 
