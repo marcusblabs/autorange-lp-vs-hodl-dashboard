@@ -172,6 +172,13 @@ table.pooltable { width: 100%; border-collapse: collapse; font-size: 13px; }
 .pooltable tbody tr:last-child td { border-bottom: 0; }
 .pooltable td.pool { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
 .pooltable .plabel { font-weight: 500; }
+/* The pool name is the one part of the row that leaves for balancer.fi; the
+   rest of the row opens the LP-vs-HODL chart. It only underlines on hover so
+   the table does not read as a wall of links, but it stays visibly distinct
+   from the plain text beside it. */
+.pooltable a.plink { color: var(--text); text-decoration: none; border-bottom: 1px dotted var(--line2, rgba(255,255,255,0.22)); }
+.pooltable a.plink:hover { color: var(--purple-soft); border-bottom-color: currentColor; }
+.pooltable a.plink:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; border-radius: 2px; }
 .pooltable td.dimtext { color: var(--muted); }
 .pooltable .dim { color: var(--muted); opacity: 0.55; }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   WINDOWS, chainName, SCAN_URL,
   DUNE_QUERY_ID, DUNE_QUERY_URL, BALANCER_POOL_URL, EXPLORER_ADDR,
@@ -57,12 +57,38 @@ export default function App() {
   // 108 pool/window pairs in the current data have OPPOSITE SIGNS on the two
   // bases, and the detail view used to hardcode the vault-token one.
   const [basis, setBasis] = useState('WRAPPED')
+  // The table's search, filters and sort. Held here rather than inside
+  // PoolTable, which is unmounted whenever a pool is open — see the note on
+  // that component. Paired with scrollRef below so "← all pools" returns to the
+  // view that was left, not to a reset one.
+  const [tableView, setTableView] = useState({
+    sort: { key: 'tvl', dir: 'desc' },
+    query: '',
+    minTvl: 0,
+    chain: 'ALL',
+    type: 'ALL',
+    show: 'LIVE',
+  })
+  const scrollRef = useRef(0)
   const loadSeq = useRef(0)
 
   const view = target ? 'detail' : 'table'
   useEffect(() => {
     document.body.dataset.view = view
   }, [view])
+
+  // Remember where the reader was in the list, and put them back there.
+  // useLayoutEffect, not useEffect: the table has to be laid out before the
+  // scroll can land, otherwise the page is still short and the position clamps
+  // to the bottom of a one-screen document.
+  const openPool = (r) => {
+    scrollRef.current = window.scrollY
+    setTarget({ id: r.id, address: r.address, chain: r.chain })
+  }
+  useLayoutEffect(() => {
+    if (target) window.scrollTo(0, 0)
+    else if (scrollRef.current) window.scrollTo(0, scrollRef.current)
+  }, [target])
 
   // One definition of "raw rows → the series both views chart and tabulate".
   // Kept in a single place on purpose: the table and the chart disagreeing was
@@ -254,13 +280,15 @@ export default function App() {
             generatedAt={scan.generatedAt}
             blacklistedCount={scan.blacklistedCount}
             excludedChains={scan.excludedChains}
-            onSelect={(r) => setTarget({ id: r.id, address: r.address, chain: r.chain })}
+            onSelect={openPool}
             onRefresh={onRefresh}
             refreshing={refreshing}
             basis={basis}
             setBasis={setBasis}
             counts={scan.counts}
             minTvlFloor={scan.minTvl}
+            view={tableView}
+            setView={setTableView}
           />
         )}
       </>

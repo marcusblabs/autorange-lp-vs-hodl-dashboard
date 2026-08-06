@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react'
-import { chainName, chainShort } from '../config'
+import { chainName, chainShort, BALANCER_POOL_URL } from '../config'
 import { fmtUsd, fmtPct, shortAddr } from '../lib/format'
 
 const TYPE_LABEL = {
@@ -144,17 +144,23 @@ function toCsv(rows) {
   return [head.join(','), ...lines].join('\n')
 }
 
-// `basis` is owned by App, not by this component: it drives the detail view's
-// headline number too, and while it lived here every navigation unmounted the
-// table and silently reset it to WRAPPED — so the reader came back to different
-// numbers than they left.
-export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCount, excludedChains, onRefresh, refreshing, basis, setBasis, counts, minTvlFloor = 1000 }) {
-  const [sort, setSort] = useState({ key: 'tvl', dir: 'desc' })
-  const [query, setQuery] = useState('')
-  const [minTvl, setMinTvl] = useState(0)
-  const [chain, setChain] = useState('ALL')
-  const [type, setType] = useState('ALL')
-  const [show, setShow] = useState('LIVE')
+// Every control on this table is owned by App, not held here.
+//
+// Opening a pool unmounts this component, so any state living inside it is
+// destroyed: coming back from a chart dropped the search, the chain and type
+// filters, the min-TVL floor, the sort, and the basis — landing the reader on
+// the default top-of-TVL view rather than the one they left. `basis` was lifted
+// first because it also changes the detail view's answer; the rest follows for
+// the same reason, and App restores the scroll position alongside it.
+export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCount, excludedChains, onRefresh, refreshing, basis, setBasis, counts, minTvlFloor = 1000, view, setView }) {
+  const { sort, query, minTvl, chain, type, show } = view
+  const patch = (p) => setView((v) => ({ ...v, ...p }))
+  const setSort = (fn) => setView((v) => ({ ...v, sort: typeof fn === 'function' ? fn(v.sort) : fn }))
+  const setQuery = (q) => patch({ query: q })
+  const setMinTvl = (v) => patch({ minTvl: v })
+  const setChain = (c) => patch({ chain: c })
+  const setType = (t) => patch({ type: t })
+  const setShow = (s) => patch({ show: s })
 
   // Only offer values that actually exist, with counts — AutoRange pools are
   // small and new, so a TVL sort buries them; this is how you find them.
@@ -408,7 +414,22 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
                   title="Open the full chart for this pool"
                 >
                   <td className="pool">
-                    <span className="plabel">{r.label}</span>
+                    {/* The name alone leaves the dashboard for Balancer's own
+                        pool page. stopPropagation keeps the row's own click —
+                        which opens the LP-vs-HODL chart — from firing too, and
+                        the keydown guard does the same for Enter/Space so
+                        keyboard users get the link rather than the chart. */}
+                    <a
+                      className="plabel plink"
+                      href={BALANCER_POOL_URL(r.chain, r.protocolVersion === 2 ? r.id : r.address, r.protocolVersion)}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                      title={`Open ${r.label} on balancer.fi`}
+                    >
+                      {r.label}
+                    </a>
                     {r.nTokens > 2 && <span className="mini">{r.nTokens}t</span>}
                     {r.boosted && (
                       <span className="mini boost" title={`Boosted pool — holds yield-bearing wrappers. Underlying assets: ${r.underlyingLabel}. Use the VS filter to switch which basket the LP is compared against.`}>
