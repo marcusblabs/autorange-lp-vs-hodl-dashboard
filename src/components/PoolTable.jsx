@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { chainName, chainShort, BALANCER_POOL_URL } from '../config'
-import { fmtUsd, fmtPct, shortAddr } from '../lib/format'
+import { fmtUsd, fmtPct, shortAddr, fmtStamp, ago } from '../lib/format'
 
 const TYPE_LABEL = {
   RECLAMM: 'AutoRange',
@@ -250,7 +250,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `lp-vs-hodl-${String(generatedAt || '').slice(0, 10) || 'export'}.csv`
+    a.download = `lp-vs-hodl-${String(generatedAt || '').slice(0, 16).replace('T', '_').replace(':', '') || 'export'}Z.csv`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -300,7 +300,11 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
             return <span style={{ color: m >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtPct(m)}</span>
           })()}</span>
         </div>
-        <div><span className="sl">UPDATED</span><span className="sv sm">{String(generatedAt || '').slice(0, 10)}</span></div>
+        <div>
+          <span className="sl">UPDATED</span>
+          <span className="sv sm">{fmtStamp(generatedAt)}
+            {ago(generatedAt) && <span className="sv-sub"> · {ago(generatedAt)}</span>}</span>
+        </div>
       </div>
 
       <div className="fbar">
@@ -538,7 +542,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
             {hiddenByShow > 0 && <> The <b>SHOW</b> filter is currently hiding <b>{hiddenByShow}</b> idle or flagged {hiddenByShow === 1 ? 'pool' : 'pools'}.</>}
           </>
         )}
-        {generatedAt && <> Data refreshed {String(generatedAt).slice(0, 10)}.</>}
+        {generatedAt && <> Data refreshed {fmtStamp(generatedAt)}.</>}
       </p>
     </>
   )

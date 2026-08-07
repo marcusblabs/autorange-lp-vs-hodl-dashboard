@@ -9,7 +9,7 @@ import PoolTable from './components/PoolTable'
 import StatCards from './components/StatCards'
 import ValueChart from './components/ValueChart'
 import GapChart from './components/GapChart'
-import { shortAddr, fmtUsd } from './lib/format'
+import { shortAddr, fmtUsd, fmtStamp, ago } from './lib/format'
 
 const WIN_LABEL = { 1: '1D', 7: '7D', 14: '14D', 30: '30D', 60: '60D', 90: '90D', 180: '180D' }
 // A v2 balancer.fi link carries the 32-byte pool id; matching only 40 hex
@@ -264,7 +264,7 @@ export default function App() {
           </button>
           <span className="muted tinystat">
             {scan
-              ? `${scan.rows.length} pools · refreshed ${String(scan.generatedAt).slice(0, 10)}`
+              ? `${scan.rows.length} pools · refreshed ${fmtStamp(scan.generatedAt)}${ago(scan.generatedAt) ? ' · ' + ago(scan.generatedAt) : ''}`
               : scanErr ? '' : 'loading…'}
           </span>
         </div>
