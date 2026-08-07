@@ -1,4 +1,4 @@
-// Static configuration for the AutoRange (reCLAMM) LP-vs-HODL dashboard.
+// Static configuration for the Balancer LP-vs-HODL dashboard.
 //
 // The pool list, daily snapshots and USD prices all come live from the
 // official Balancer API (see lib/balancer.js), across every chain
