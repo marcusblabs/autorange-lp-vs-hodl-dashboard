@@ -157,13 +157,14 @@ function toCsv(rows) {
 // first because it also changes the detail view's answer; the rest follows for
 // the same reason, and App restores the scroll position alongside it.
 export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCount, excludedChains, onRefresh, refreshing, basis, setBasis, counts, minTvlFloor = 1000, view, setView }) {
-  const { sort, query, minTvl, chain, type, show } = view
+  const { sort, query, minTvl, chain, type, ver, show } = view
   const patch = (p) => setView((v) => ({ ...v, ...p }))
   const setSort = (fn) => setView((v) => ({ ...v, sort: typeof fn === 'function' ? fn(v.sort) : fn }))
   const setQuery = (q) => patch({ query: q })
   const setMinTvl = (v) => patch({ minTvl: v })
   const setChain = (c) => patch({ chain: c })
   const setType = (t) => patch({ type: t })
+  const setVer = (v) => patch({ ver: v })
   const setShow = (s) => patch({ show: s })
 
   // Only offer values that actually exist, with counts — AutoRange pools are
@@ -175,6 +176,12 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
   const types = useMemo(() => {
     const c = rows.reduce((m, r) => m.set(r.type, (m.get(r.type) || 0) + 1), new Map())
     return [...c.entries()].sort((a, b) => b[1] - a[1])
+  }, [rows])
+  // Versions are listed newest-first rather than by count, because it is an ordered
+  // axis — reading v3, v2, v1 is what anyone expects, whatever the populations are.
+  const versions = useMemo(() => {
+    const c = rows.reduce((m, r) => (r.protocolVersion ? m.set(r.protocolVersion, (m.get(r.protocolVersion) || 0) + 1) : m), new Map())
+    return [...c.entries()].sort((a, b) => b[0] - a[0])
   }, [rows])
 
   const matchesQuery = (r, q) =>
@@ -208,6 +215,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
       (r) =>
         (chain === 'ALL' || r.chain === chain) &&
         (type === 'ALL' || r.type === type) &&
+        (ver === 'ALL' || r.protocolVersion === +ver) &&
         r.tvl >= minTvl
     )
     // Counted separately from hiddenByFilters so the footnote can state what
@@ -215,7 +223,7 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
     // pools, which is right, but it was doing so without ever saying how many.
     const hiddenByShow = rows.filter((r) => matchesQuery(r, q)).length - eligible.length
     return { filtered: out, hiddenByFilters: eligible.length - out.length, hiddenByShow }
-  }, [rows, query, minTvl, chain, type, show])
+  }, [rows, query, minTvl, chain, type, ver, show])
 
   const sorted = useMemo(() => {
     const out = [...filtered]
@@ -340,6 +348,15 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
           </select>
         </span>
         <span className="fgroup">
+          <span className="flabel">VER</span>
+          <select value={ver} onChange={(e) => setVer(e.target.value)}>
+            <option value="ALL">ALL</option>
+            {versions.map(([v, n]) => (
+              <option key={v} value={v}>v{v} ({n})</option>
+            ))}
+          </select>
+        </span>
+        <span className="fgroup">
           <span className="flabel">MIN-TVL</span>
           <select value={minTvl} onChange={(e) => setMinTvl(+e.target.value)}>
             {TVL_STEPS.map((s) => (
@@ -367,10 +384,10 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
             {refreshing ? '[ REFRESHING… ]' : '[ REFRESH ]'}
           </button>
         )}
-        {(query || chain !== 'ALL' || type !== 'ALL' || minTvl || show !== 'LIVE') && (
+        {(query || chain !== 'ALL' || type !== 'ALL' || ver !== 'ALL' || minTvl || show !== 'LIVE') && (
           <button
             className="fbtn"
-            onClick={() => { setQuery(''); setChain('ALL'); setType('ALL'); setMinTvl(0); setShow('LIVE') }}
+            onClick={() => { setQuery(''); setChain('ALL'); setType('ALL'); setVer('ALL'); setMinTvl(0); setShow('LIVE') }}
           >
             [ RESET ]
           </button>
@@ -380,8 +397,8 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
       {hiddenByFilters > 0 && (
         <div className="hint">
           <b>{hiddenByFilters}</b> more {hiddenByFilters === 1 ? 'pool matches' : 'pools match'} but{' '}
-          {hiddenByFilters === 1 ? 'is' : 'are'} hidden by the chain, type or min-TVL filter.
-          <button className="fbtn" onClick={() => { setChain('ALL'); setType('ALL'); setMinTvl(0) }}>
+          {hiddenByFilters === 1 ? 'is' : 'are'} hidden by the chain, type, version or min-TVL filter.
+          <button className="fbtn" onClick={() => { setChain('ALL'); setType('ALL'); setVer('ALL'); setMinTvl(0) }}>
             [ SHOW THEM ]
           </button>
         </div>

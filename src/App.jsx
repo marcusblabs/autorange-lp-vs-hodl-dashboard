@@ -67,6 +67,7 @@ export default function App() {
     minTvl: 0,
     chain: 'ALL',
     type: 'ALL',
+    ver: 'ALL',
     show: 'LIVE',
   })
   const scrollRef = useRef(0)
