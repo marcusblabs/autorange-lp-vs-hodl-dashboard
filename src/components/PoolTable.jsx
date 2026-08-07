@@ -76,6 +76,7 @@ function gapStyle(v) {
 const COLS = [
   { key: 'label', label: 'POOL', align: 'left' },
   { key: 'type', label: 'TYPE', align: 'left' },
+  { key: 'ver', label: 'VER', align: 'left', title: 'Balancer protocol version the pool is deployed on. Every row already carried it; it just was not shown.' },
   { key: 'chain', label: 'CHAIN', align: 'left' },
   { key: 'tvl', label: 'TVL', align: 'right' },
   ...WIN_COLS.map((w) => ({
@@ -104,6 +105,9 @@ function sortValue(r, key, basis) {
     case 'label': return r.label.toLowerCase()
     case 'chain': return chainShort(r.chain).toLowerCase()
     case 'type': return (TYPE_LABEL[r.type] || r.type).toLowerCase()
+    // Numeric on purpose: sorting the rendered "v2"/"v3" as text would put v10 before v2
+    // the day a v10 exists, and reads as sorted until you look closely.
+    case 'ver': return r.protocolVersion ?? null
     case 'tvl': return r.tvl
     case 'w30': return gapOf(r.win[30], basis)
     case 'w90': return gapOf(r.win[90], basis)
@@ -119,7 +123,7 @@ function sortValue(r, key, basis) {
 
 function toCsv(rows) {
   const head = [
-    'pool', 'address', 'chain', 'type', 'tvl_usd',
+    'pool', 'address', 'chain', 'type', 'protocol_version', 'tvl_usd',
     'vs_pooltokens_30d', 'vs_pooltokens_90d', 'vs_pooltokens_180d', 'vs_pooltokens_full',
     'vs_underlying_30d', 'vs_underlying_90d', 'vs_underlying_180d', 'vs_underlying_full',
     'fees_pct_entry_capital', 'il_drag_vs_pooltokens', 'il_drag_vs_underlying',
@@ -133,7 +137,7 @@ function toCsv(rows) {
   const lines = rows.map((r) => {
     const bw = bestWindow(r)
     return [
-      r.label, r.address, r.chain, TYPE_LABEL[r.type] || r.type, r.tvl,
+      r.label, r.address, r.chain, TYPE_LABEL[r.type] || r.type, r.protocolVersion ?? '', r.tvl,
       r.win[30]?.gap ?? '', r.win[90]?.gap ?? '', r.win[180]?.gap ?? '', r.win.full?.gap ?? '',
       r.win[30]?.gapU ?? '', r.win[90]?.gapU ?? '', r.win[180]?.gapU ?? '', r.win.full?.gapU ?? '',
       bw?.fees ?? '', bw?.drag ?? '', bw?.dragU ?? bw?.drag ?? '',
@@ -460,6 +464,8 @@ export default function PoolTable({ rows, onSelect, generatedAt, blacklistedCoun
                     )}
                   </td>
                   <td className="dimtext">{TYPE_LABEL[r.type] || r.type}</td>
+                  <td>{r.protocolVersion ? <span className={'vtag v' + r.protocolVersion}>v{r.protocolVersion}</span>
+                                         : <span className="dim">—</span>}</td>
                   <td><span className="chaintag">{chainShort(r.chain)}</span></td>
                   <td className="r num">{fmtUsd(r.tvl)}</td>
                   {WIN_COLS.map((w) => {
